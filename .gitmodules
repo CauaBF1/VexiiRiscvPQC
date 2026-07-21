@@ -14,3 +14,6 @@
 [submodule "ext/SpinalHDL"]
 	path = ext/SpinalHDL
 	url = https://github.com/SpinalHDL/SpinalHDL.git
+[submodule "external/mlkem-native"]
+	path = external/mlkem-native
+	url = https://github.com/pq-code-package/mlkem-native

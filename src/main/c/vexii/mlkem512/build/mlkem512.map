@@ -1,0 +1,265 @@
+
+Merging object attributes
+
+
+There are no discarded input sections
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+RAM              0x0000000080000000 0x0000000001000000 xrw
+*default*        0x0000000000000000 0xffffffffffffffff
+
+Linker script and memory map
+
+LOAD build/src/main_kat.o
+LOAD build/src/randombytes.o
+LOAD build/src/support.o
+LOAD build/src/crt.o
+LOAD build/mlkem-native/mlkem_native.o
+                0x0000000000010000                _stack_size = DEFINED (_stack_size)?_stack_size:0x10000
+                0x0000000000004000                _heap_size = DEFINED (_heap_size)?_heap_size:0x4000
+
+._vector        0x0000000080000000     0x2576
+ *crt.o(.start_jump)
+ .start_jump    0x0000000080000000        0x4 build/src/crt.o
+                0x0000000080000000                crtStart
+ *(.text .text.*)
+ .text          0x0000000080000004       0x82 build/src/main_kat.o
+ .text.startup  0x0000000080000086      0x194 build/src/main_kat.o
+                0x0000000080000086                main
+ .text          0x000000008000021a       0x3e build/src/randombytes.o
+                0x000000008000021a                randombytes
+ .text          0x0000000080000258       0xc8 build/src/support.o
+                0x0000000080000258                memcpy
+                0x0000000080000274                memset
+                0x0000000080000288                memcmp
+                0x00000000800002b0                malloc
+                0x00000000800002fc                free
+                0x000000008000031e                exit
+ .text          0x0000000080000320       0x38 build/src/crt.o
+                0x0000000080000350                pass
+                0x0000000080000354                fail
+ .text          0x0000000080000358     0x221e build/mlkem-native/mlkem_native.o
+                0x000000008000105e                mlkem_check_pk
+                0x00000000800010d6                mlkem_shake128_init
+                0x00000000800010d8                mlkem_shake128_release
+                0x00000000800010e0                mlkem_shake128x4_init
+                0x00000000800010e2                mlkem_shake128x4_release
+                0x00000000800010ea                mlkem_keccakf1600_extract_bytes
+                0x00000000800011b4                mlkem_shake128_squeezeblocks
+                0x00000000800011ee                mlkem_keccakf1600_xor_bytes
+                0x0000000080001312                mlkem_shake128_absorb_once
+                0x000000008000131e                mlkem_shake256
+                0x0000000080001364                mlkem_sha3_256
+                0x000000008000139e                mlkem_check_sk
+                0x00000000800013ea                mlkem_sha3_512
+                0x0000000080001424                mlkem_keccakf1600x4_extract_bytes
+                0x0000000080001426                mlkem_keccakf1600x4_xor_bytes
+                0x0000000080001428                mlkem_keccakf1600x4_permute
+                0x00000000800014aa                mlkem_shake128x4_squeezeblocks
+                0x0000000080001580                mlkem_shake256x4
+                0x00000000800016ae                mlkem_shake128x4_absorb_once
+                0x0000000080001d82                mlkem_dec
+                0x00000000800020f6                mlkem_enc_derand
+                0x000000008000218c                mlkem_enc
+                0x00000000800024d8                mlkem_keypair_derand
+                0x0000000080002526                mlkem_keypair
+                0x0000000080002572                mlkem_keccakf1600_permute
+
+.rodata         0x0000000080002580      0xf60
+ *(.rdata)
+ *(.rodata .rodata.*)
+ .rodata.str1.8
+                0x0000000080002580       0x9d build/src/main_kat.o
+ *fill*         0x000000008000261d        0x3 
+ .rodata        0x0000000080002620      0xd00 build/src/main_kat.o
+ .rodata        0x0000000080003320      0x1c0 build/mlkem-native/mlkem_native.o
+ *(.gnu.linkonce.r.*)
+ *(.srodata.cst16)
+ *(.srodata.cst8)
+ *(.srodata.cst4)
+ *(.srodata.cst2)
+ *(.srodata .srodata.*)
+
+.rela.dyn       0x00000000800034e0        0x0
+ .rela.text     0x00000000800034e0        0x0 build/src/main_kat.o
+
+.data           0x00000000800034e0        0x4
+                0x00000000800034e0                . = ALIGN (0x8)
+                0x0000000080003ce0                PROVIDE (__global_pointer$ = (. + 0x800))
+ *(.data .data.*)
+ .data          0x00000000800034e0        0x0 build/src/main_kat.o
+ .data          0x00000000800034e0        0x0 build/src/randombytes.o
+ .data          0x00000000800034e0        0x0 build/src/support.o
+ .data          0x00000000800034e0        0x0 build/src/crt.o
+ .data          0x00000000800034e0        0x0 build/mlkem-native/mlkem_native.o
+ *(.gnu.linkonce.d.*)
+ *(.sdata .sdata.*)
+ .sdata         0x00000000800034e0        0x4 build/src/randombytes.o
+ *(.gnu.linkonce.s.*)
+
+.bss            0x00000000800034e8      0xcd0
+                0x00000000800034e8                . = ALIGN (0x8)
+                0x00000000800034e8                _bss_start = .
+ *(.sbss*)
+ .sbss          0x00000000800034e8        0x8 build/src/support.o
+ .sbss          0x00000000800034f0        0x8 build/mlkem-native/mlkem_native.o
+                0x00000000800034f0                mlkem_ct_opt_blocker_u64
+ *(.gnu.linkonce.sb.*)
+ *(.bss .bss.*)
+ .bss           0x00000000800034f8      0xcc0 build/src/main_kat.o
+ .bss           0x00000000800041b8        0x0 build/src/randombytes.o
+ .bss           0x00000000800041b8        0x0 build/src/support.o
+ .bss           0x00000000800041b8        0x0 build/src/crt.o
+ .bss           0x00000000800041b8        0x0 build/mlkem-native/mlkem_native.o
+ *(.gnu.linkonce.b.*)
+ *(COMMON)
+                0x00000000800041b8                . = ALIGN (0x8)
+                0x00000000800041b8                _bss_end = .
+
+._user_heap     0x00000000800041b8     0x4000
+                0x00000000800041b8                . = ALIGN (0x8)
+                0x00000000800041b8                PROVIDE (_heap_start = .)
+                0x00000000800081b8                . = (. + _heap_size)
+ *fill*         0x00000000800041b8     0x4000 
+                0x00000000800081b8                . = ALIGN (0x8)
+                0x00000000800081b8                PROVIDE (_heap_end = .)
+
+._stack         0x00000000800081b8    0x10008
+                0x00000000800081c0                . = ALIGN (0x10)
+ *fill*         0x00000000800081b8        0x8 
+                [!provide]                        PROVIDE (_stack_end = .)
+                0x00000000800181c0                . = (. + _stack_size)
+ *fill*         0x00000000800081c0    0x10000 
+                0x00000000800181c0                . = ALIGN (0x10)
+                0x00000000800181c0                PROVIDE (_stack_start = .)
+LOAD /home/borgescaua/opt/riscv-elf-multilib/lib/gcc/riscv64-unknown-elf/16.1.0/rv64imac/lp64/libgcc.a
+OUTPUT(build/mlkem512.elf elf64-littleriscv)
+
+.debug_info     0x0000000000000000     0x8e58
+ .debug_info    0x0000000000000000      0x9cc build/src/main_kat.o
+ .debug_info    0x00000000000009cc      0x115 build/src/randombytes.o
+ .debug_info    0x0000000000000ae1      0x3dd build/src/support.o
+ .debug_info    0x0000000000000ebe       0x23 build/src/crt.o
+ .debug_info    0x0000000000000ee1     0x7f77 build/mlkem-native/mlkem_native.o
+
+.debug_abbrev   0x0000000000000000      0xcab
+ .debug_abbrev  0x0000000000000000      0x2b4 build/src/main_kat.o
+ .debug_abbrev  0x00000000000002b4       0xb6 build/src/randombytes.o
+ .debug_abbrev  0x000000000000036a      0x19a build/src/support.o
+ .debug_abbrev  0x0000000000000504       0x12 build/src/crt.o
+ .debug_abbrev  0x0000000000000516      0x795 build/mlkem-native/mlkem_native.o
+
+.debug_loclists
+                0x0000000000000000     0x5514
+ .debug_loclists
+                0x0000000000000000      0x224 build/src/main_kat.o
+ .debug_loclists
+                0x0000000000000224       0x3c build/src/randombytes.o
+ .debug_loclists
+                0x0000000000000260      0x174 build/src/support.o
+ .debug_loclists
+                0x00000000000003d4     0x5140 build/mlkem-native/mlkem_native.o
+
+.debug_aranges  0x0000000000000000      0x110
+ .debug_aranges
+                0x0000000000000000       0x40 build/src/main_kat.o
+ .debug_aranges
+                0x0000000000000040       0x30 build/src/randombytes.o
+ .debug_aranges
+                0x0000000000000070       0x30 build/src/support.o
+ .debug_aranges
+                0x00000000000000a0       0x40 build/src/crt.o
+ .debug_aranges
+                0x00000000000000e0       0x30 build/mlkem-native/mlkem_native.o
+
+.debug_rnglists
+                0x0000000000000000      0x88d
+ .debug_rnglists
+                0x0000000000000000       0x86 build/src/main_kat.o
+ .debug_rnglists
+                0x0000000000000086       0x13 build/src/randombytes.o
+ .debug_rnglists
+                0x0000000000000099       0x21 build/src/support.o
+ .debug_rnglists
+                0x00000000000000ba       0x21 build/src/crt.o
+ .debug_rnglists
+                0x00000000000000db      0x7b2 build/mlkem-native/mlkem_native.o
+
+.debug_line     0x0000000000000000     0x609d
+ .debug_line    0x0000000000000000      0x41f build/src/main_kat.o
+ .debug_line    0x000000000000041f       0xf7 build/src/randombytes.o
+ .debug_line    0x0000000000000516      0x2fa build/src/support.o
+ .debug_line    0x0000000000000810       0xa4 build/src/crt.o
+ .debug_line    0x00000000000008b4     0x57e9 build/mlkem-native/mlkem_native.o
+
+.debug_str      0x0000000000000000     0x126d
+ .debug_str     0x0000000000000000     0x126d build/src/main_kat.o
+                                        0x254 (size before relaxing)
+ .debug_str     0x000000000000126d        0x0 build/src/randombytes.o
+                                        0x159 (size before relaxing)
+ .debug_str     0x000000000000126d        0x0 build/src/support.o
+                                        0x1c4 (size before relaxing)
+ .debug_str     0x000000000000126d        0x0 build/src/crt.o
+                                         0x4f (size before relaxing)
+ .debug_str     0x000000000000126d        0x0 build/mlkem-native/mlkem_native.o
+                                       0x119b (size before relaxing)
+
+.debug_line_str
+                0x0000000000000000      0x2e2
+ .debug_line_str
+                0x0000000000000000      0x2e2 build/src/main_kat.o
+                                        0x10e (size before relaxing)
+ .debug_line_str
+                0x00000000000002e2        0x0 build/src/randombytes.o
+                                         0xc6 (size before relaxing)
+ .debug_line_str
+                0x00000000000002e2        0x0 build/src/support.o
+                                         0xbe (size before relaxing)
+ .debug_line_str
+                0x00000000000002e2        0x0 build/src/crt.o
+                                         0x43 (size before relaxing)
+ .debug_line_str
+                0x00000000000002e2        0x0 build/mlkem-native/mlkem_native.o
+                                        0x29d (size before relaxing)
+
+.comment        0x0000000000000000       0x19
+ .comment       0x0000000000000000       0x19 build/src/main_kat.o
+                                         0x1a (size before relaxing)
+ .comment       0x0000000000000019        0x0 build/src/randombytes.o
+                                         0x1a (size before relaxing)
+ .comment       0x0000000000000019        0x0 build/src/support.o
+                                         0x1a (size before relaxing)
+ .comment       0x0000000000000019        0x0 build/mlkem-native/mlkem_native.o
+                                         0x1a (size before relaxing)
+
+.note.GNU-stack
+                0x0000000000000000        0x0
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/src/main_kat.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/src/randombytes.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/src/support.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 build/mlkem-native/mlkem_native.o
+
+.riscv.attributes
+                0x0000000000000000       0x57
+ .riscv.attributes
+                0x0000000000000000       0x57 build/src/main_kat.o
+ .riscv.attributes
+                0x0000000000000057       0x57 build/src/randombytes.o
+ .riscv.attributes
+                0x00000000000000ae       0x57 build/src/support.o
+ .riscv.attributes
+                0x0000000000000105       0x55 build/src/crt.o
+ .riscv.attributes
+                0x000000000000015a       0x57 build/mlkem-native/mlkem_native.o
+
+.debug_frame    0x0000000000000000      0xa78
+ .debug_frame   0x0000000000000000       0xb0 build/src/main_kat.o
+ .debug_frame   0x00000000000000b0       0x28 build/src/randombytes.o
+ .debug_frame   0x00000000000000d8       0xa0 build/src/support.o
+ .debug_frame   0x0000000000000178      0x900 build/mlkem-native/mlkem_native.o
