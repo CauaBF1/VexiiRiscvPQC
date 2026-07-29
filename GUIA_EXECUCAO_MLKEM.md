@@ -126,7 +126,109 @@ make -C src/main/c/vexii/mlkem512 clean        # limpar build do firmware
 
 ---
 
+## Executar na placa pelo vlab (ambiente já preparado) ✅ VALIDADO
+
+Este é o fluxo **realmente executado e validado** (deu `KAT PASS` na Tang Primer
+20K). Pressupõe que **tudo já está pronto na conta `caua` do vlab**: o repositório
+em `~/VexiiRiscvPQC` (com submódulo), o LiteX em `~/litex` com o venv `~/litex-env`
+e os patches aplicados, o Gowin instalado e a placa conectada. Para o *porquê* de
+cada patch e da configuração, ver `understanding/done_execucao_vexii_vlab.md`.
+
+> ⚠️ Na placa o VexII sai como **rv32im (32-bit)**, não 64-bit — o variant
+> `standard` do LiteX é 32-bit. O ML-KEM roda e valida igual (KAT PASS). A
+> discussão sim(64)×placa(32) e a inviabilidade de 64-bit no GW2A-18 estão na §11
+> do `done_execucao_vexii_vlab.md`.
+
+### 0. Entrar no vlab e preparar o terminal
+
+```bash
+ssh vlab                     # entra como caua
+cd ~/litex
+source ~/litex-env/bin/activate
+export PYTHONPATH=$PWD/litex:$PWD/litex-boards
+export GOWIN_HOME=/var/local/Gowin_V1.9.10.03_Education_linux/IDE
+export PATH=$GOWIN_HOME/bin:$PATH
+export LD_PRELOAD=/lib/x86_64-linux-gnu/libfreetype.so.6
+```
+
+### 1. Abrir a UART (terminal A) — **antes** de gravar
+
+O ML-KEM imprime **uma vez no boot**, então abra a serial primeiro. O console é o
+canal B do FT2232 → **`/dev/ttyUSB2`**:
+
+```bash
+source ~/litex-env/bin/activate
+python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
+```
+
+Se **não houver** `/dev/ttyUSB*` (o `openFPGALoader` costuma soltar o `ftdi_sio`):
+```bash
+sudo modprobe -r ftdi_sio && sudo modprobe ftdi_sio   # recria as portas
+# sem sudo: pedir um replug do cabo USB da placa
+ls /dev/ttyUSB*                                        # deve listar USB0/USB1/USB2
+```
+
+### 2. Gravar o bitstream (terminal B) — dispara o boot e o KAT
+
+O bitstream vai para a **SRAM (volátil)**: some ao desligar. Se o `build/` já
+existe, basta **re-gravar** o `.fs` já gerado (rápido, não recompila nada):
+
+```bash
+# (mesmas exports da etapa 0 neste terminal)
+openFPGALoader --cable ft2232 \
+  --bitstream ~/litex/build/sipeed_tang_primer_20k/gateware/sipeed_tang_primer_20k.fs
+```
+
+No **terminal A** deve aparecer:
+```text
+[MLKEM] ML-KEM-512 KAT start
+[MLKEM] bench_keypair_cycles=935266
+[MLKEM] bench_encaps_cycles=1072913
+[MLKEM] bench_decaps_cycles=1356973
+[MLKEM] KAT PASS
+```
+(seguido do banner do BIOS e `No boot medium found` — normal; o ML-KEM roda antes
+do boot). `KAT PASS` = pk/sk/ct/ss bateram byte-a-byte.
+
+### 3. (Só se precisar) Regerar o bitstream do zero
+
+Se o `build/` foi apagado ou você mudou algo, rode o build completo (regenera
+netlist + BIOS + gateware; leva alguns minutos):
+
+```bash
+cd ~/litex
+python3 -m litex_boards.targets.sipeed_tang_primer_20k \
+  --cpu-type=vexiiriscv --cpu-variant=standard \
+  --uart-name=serial \
+  --bios-console=disable --bios-lto \
+  --integrated-rom-size=0x8000 --integrated-sram-size=0x8000 \
+  --integrated-main-ram-size=0x100 \
+  --build --load
+```
+
+> ⚠️ Se você recriar o `~/litex` do zero (novo clone), os **patches somem** e o
+> build falha. Reaplicar antes de buildar (detalhes/porquês no
+> `done_execucao_vexii_vlab.md`):
+> ```bash
+> # Patch 1 — remove flags legadas que o VexII "isamap" rejeita
+> sed -i 's/ --with-mul --with-div --allow-bypass-from=0/ --allow-bypass-from=0/' \
+>   ~/litex/litex/litex/soc/cores/cpu/vexiiriscv/core.py
+> # Patch 3 — remove o 2º driver de sys_rst (GowinSynthesis rejeita multi-driver)
+> sed -i 's@self.specials += AsyncResetSynchronizer(self.cd_sys, ~pll.locked | self.rst | self.reset)@#&@' \
+>   ~/litex/litex-boards/litex_boards/targets/sipeed_tang_primer_20k.py
+> # Patch 2 — dependência de build do BIOS
+> pip3 install meson ninja
+> # + recopiar os 3 arquivos do bios e reaplicar o patch do Makefile/main.c
+> ```
+
+---
+
 ## Executar na placa Sipeed Tang Primer 20K com VexiiRiscv (via LiteX)
+
+> ℹ️ A seção abaixo é a documentação **genérica/original** (escrita antes da
+> execução real). O fluxo **provado** é o **"Executar na placa pelo vlab"** acima.
+> Onde houver divergência (ex.: `--vexii-args`, tamanho de ROM, porta serial),
+> vale o fluxo do vlab.
 
 > **Este repositório NÃO instala o LiteX.** Esta seção documenta como fazer o
 > fluxo de placa. Os comandos de **simulação** acima são os validados; o fluxo
