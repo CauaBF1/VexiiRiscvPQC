@@ -1,10 +1,20 @@
 PROJ_NAME = mlkem512
 BENCH_ROUNDS ?= 2
 KAT ?= no
+# PROFILE=yes: per-component (Keccak vs NTT) cycle accounting via -DMLK_PROFILE.
+# Inert otherwise (macros expand to nothing; binary identical).
+PROFILE ?= no
 
 # repo root, relative to this makefile (src/main/c/vexii/mlkem512)
 ROOT := ../../../../..
 MLKEM_NATIVE_DIR := $(ROOT)/external/mlkem-native/mlkem
+# The mlkem-native submodule is pinned at the clean upstream commit; our edits
+# (montmul .insn hook + profiling brackets) live in this versioned patch. Run
+# `make prep` once after `git clone --recursive` to apply it. Without it, the
+# build still works with stock mlkem-native (macros are inert / hooks absent).
+MLKEM_NATIVE_ROOT := $(ROOT)/external/mlkem-native
+# absolute: `git -C DIR apply FILE` resolves FILE relative to DIR, not to cwd.
+MLKEM_PATCH       := $(abspath $(ROOT)/external/mlkem-native.patch)
 
 APP_C_SRCS   := $(wildcard src/*.c)
 APP_ASM_SRCS := $(wildcard src/*.S)
@@ -27,11 +37,21 @@ RISCV_NAME ?= riscv64-unknown-elf
 RISCV_PATH ?= /home/borgescaua/opt/riscv-elf-multilib
 
 MABI  := lp64
-MARCH := rv64imac_zicsr   # rv64: 'm' for Kyber mul, 'c' matches newlib multilib, zicsr for rdcycle
+# rv64: 'm' for Kyber mul, 'c' matches newlib multilib, zicsr for rdcycle.
+# Overridable so the accel experiments can pass e.g. rv64imac_zba_zbb_zicsr.
+MARCH ?= rv64imac_zicsr
+# Optimization level, overridable (baseline -Os; accel runs test -O2/-O3).
+OPT   ?= -Os
 
 CFLAGS  += -march=$(MARCH) -mabi=$(MABI) -DNDEBUG -DBENCH_ROUNDS=$(BENCH_ROUNDS)
 CFLAGS  += -DMLK_CONFIG_FILE=\"mlkem_native_vexii_config.h\"
-CFLAGS  += -g -Os -mcmodel=medany -MD -fstrict-volatile-bitfields -fno-strict-aliasing -ffreestanding
+CFLAGS  += -g $(OPT) -mcmodel=medany -MD -fstrict-volatile-bitfields -fno-strict-aliasing -ffreestanding
+ifeq ($(PROFILE),yes)
+CFLAGS  += -DMLK_PROFILE
+endif
+# CFLAGS_EXTRA: pass extra defines without editing the makefile, e.g.
+# CFLAGS_EXTRA=-DMLK_USE_MONTMUL to route mlk_fqmul through the montmul instruction.
+CFLAGS  += $(CFLAGS_EXTRA)
 LDFLAGS += -march=$(MARCH) -mabi=$(MABI)
 LDFLAGS += -nostdlib -nostartfiles -ffreestanding -mcmodel=medany
 LDFLAGS += -Wl,-Bstatic,-T,$(LDSCRIPT),-Map,$(OBJDIR)/$(PROJ_NAME).map,--print-memory-usage
@@ -70,6 +90,22 @@ $(OBJDIR)/src/%.o: src/%.S
 $(OBJDIR)/mlkem-native/%.o: $(MLKEM_NATIVE_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(RISCV_CC) -c $(CFLAGS) $(INC) -o $@ $<
+
+.PHONY: prep
+prep:
+	@if git -C $(MLKEM_NATIVE_ROOT) apply --reverse --check $(MLKEM_PATCH) 2>/dev/null; then \
+	  echo "mlkem-native patch already applied"; \
+	elif git -C $(MLKEM_NATIVE_ROOT) apply --check $(MLKEM_PATCH) 2>/dev/null; then \
+	  git -C $(MLKEM_NATIVE_ROOT) apply $(MLKEM_PATCH) && echo "mlkem-native patch applied"; \
+	else \
+	  echo "ERROR: $(MLKEM_PATCH) does not apply cleanly (submodule at wrong commit?)"; exit 1; \
+	fi
+
+.PHONY: unprep
+unprep:
+	@git -C $(MLKEM_NATIVE_ROOT) apply --reverse --check $(MLKEM_PATCH) 2>/dev/null \
+	  && git -C $(MLKEM_NATIVE_ROOT) apply --reverse $(MLKEM_PATCH) && echo "mlkem-native patch reverted" \
+	  || echo "mlkem-native patch not applied (nothing to revert)"
 
 .PHONY: clean
 clean:

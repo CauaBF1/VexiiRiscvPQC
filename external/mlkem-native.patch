@@ -1,0 +1,291 @@
+diff --git a/mlkem/src/compress.c b/mlkem/src/compress.c
+index 874ea1ef..4d91b77a 100644
+--- a/mlkem/src/compress.c
++++ b/mlkem/src/compress.c
+@@ -88,7 +88,11 @@ __contract__(
+   }
+ #endif /* MLK_USE_NATIVE_POLY_COMPRESS_D4 */
+ 
+-  mlk_poly_compress_d4_c(r, a);
++  {
++    MLK_PROF_ENTER();
++    mlk_poly_compress_d4_c(r, a);
++    MLK_PROF_EXIT(MLK_PB_COMPRESS);
++  }
+ }
+ 
+ /* Reference: Embedded into `polyvec_compress()` in the
+@@ -155,7 +159,11 @@ __contract__(
+   }
+ #endif /* MLK_USE_NATIVE_POLY_COMPRESS_D10 */
+ 
+-  mlk_poly_compress_d10_c(r, a);
++  {
++    MLK_PROF_ENTER();
++    mlk_poly_compress_d10_c(r, a);
++    MLK_PROF_EXIT(MLK_PB_COMPRESS);
++  }
+ }
+ 
+ /* Reference: `poly_decompress()` in the reference implementation @[REF],
+@@ -203,7 +211,11 @@ __contract__(
+   }
+ #endif /* MLK_USE_NATIVE_POLY_DECOMPRESS_D4 */
+ 
+-  mlk_poly_decompress_d4_c(r, a);
++  {
++    MLK_PROF_ENTER();
++    mlk_poly_decompress_d4_c(r, a);
++    MLK_PROF_EXIT(MLK_PB_COMPRESS);
++  }
+ }
+ 
+ /* Reference: Embedded into `polyvec_decompress()` in the
+@@ -266,7 +278,11 @@ __contract__(
+   }
+ #endif /* MLK_USE_NATIVE_POLY_DECOMPRESS_D10 */
+ 
+-  mlk_poly_decompress_d10_c(r, a);
++  {
++    MLK_PROF_ENTER();
++    mlk_poly_decompress_d10_c(r, a);
++    MLK_PROF_EXIT(MLK_PB_COMPRESS);
++  }
+ }
+ #endif /* MLK_CONFIG_MULTILEVEL_WITH_SHARED || MLKEM_K == 2 || MLKEM_K == 3 */
+ 
+@@ -679,6 +695,7 @@ MLK_INTERNAL_API
+ void mlk_poly_frommsg(mlk_poly *r, const uint8_t msg[MLKEM_INDCPA_MSGBYTES])
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+ #if (MLKEM_INDCPA_MSGBYTES != MLKEM_N / 8)
+ #error "MLKEM_INDCPA_MSGBYTES must be equal to MLKEM_N/8 bytes!"
+ #endif
+@@ -704,6 +721,7 @@ void mlk_poly_frommsg(mlk_poly *r, const uint8_t msg[MLKEM_INDCPA_MSGBYTES])
+       r->coeffs[8 * i + j] = mlk_ct_sel_int16(MLKEM_Q_HALF, 0, msg[i] & mask);
+     }
+   }
++  MLK_PROF_EXIT(MLK_PB_ENCODE);
+   mlk_assert_abs_bound(r, MLKEM_N, MLKEM_Q);
+ }
+ 
+@@ -717,6 +735,7 @@ MLK_INTERNAL_API
+ void mlk_poly_tomsg(uint8_t msg[MLKEM_INDCPA_MSGBYTES], const mlk_poly *r)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   mlk_assert_bound(r, MLKEM_N, 0, MLKEM_Q);
+ 
+   for (i = 0; i < MLKEM_N / 8; i++)
+@@ -734,6 +753,7 @@ void mlk_poly_tomsg(uint8_t msg[MLKEM_INDCPA_MSGBYTES], const mlk_poly *r)
+       msg[i] |= (uint8_t)(t << j);
+     }
+   }
++  MLK_PROF_EXIT(MLK_PB_ENCODE);
+ }
+ 
+ #else /* !MLK_CONFIG_MULTILEVEL_NO_SHARED */
+diff --git a/mlkem/src/fips202/keccakf1600.c b/mlkem/src/fips202/keccakf1600.c
+index 586b283f..925d1f41 100644
+--- a/mlkem/src/fips202/keccakf1600.c
++++ b/mlkem/src/fips202/keccakf1600.c
+@@ -37,6 +37,7 @@ void mlk_keccakf1600_extract_bytes(uint64_t *state, unsigned char *data,
+                                    unsigned offset, unsigned length)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+ #if defined(MLK_SYS_LITTLE_ENDIAN)
+   uint8_t *state_ptr = (uint8_t *)state + offset;
+   for (i = 0; i < length; i++)
+@@ -54,12 +55,14 @@ void mlk_keccakf1600_extract_bytes(uint64_t *state, unsigned char *data,
+     data[i] = (state[(offset + i) >> 3] >> (8 * ((offset + i) & 0x07))) & 0xFF;
+   }
+ #endif /* !MLK_SYS_LITTLE_ENDIAN */
++  MLK_PROF_EXIT(MLK_PB_HASHBYTES);
+ }
+ 
+ void mlk_keccakf1600_xor_bytes(uint64_t *state, const unsigned char *data,
+                                unsigned offset, unsigned length)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+ #if defined(MLK_SYS_LITTLE_ENDIAN)
+   uint8_t *state_ptr = (uint8_t *)state + offset;
+   for (i = 0; i < length; i++)
+@@ -78,6 +81,7 @@ void mlk_keccakf1600_xor_bytes(uint64_t *state, const unsigned char *data,
+                                 << (8 * ((offset + i) & 0x07));
+   }
+ #endif /* !MLK_SYS_LITTLE_ENDIAN */
++  MLK_PROF_EXIT(MLK_PB_HASHBYTES);
+ }
+ 
+ static void mlk_keccakf1600x4_extract_bytes_c(uint64_t *state,
+@@ -484,7 +488,9 @@ void mlk_keccakf1600_permute(uint64_t *state)
+     return;
+   }
+ #endif /* MLK_USE_FIPS202_X1_NATIVE */
++  MLK_PROF_ENTER();
+   mlk_keccakf1600_permute_c(state);
++  MLK_PROF_EXIT(MLK_PB_KECCAK);
+ }
+ 
+ #else /* !MLK_CONFIG_MULTILEVEL_NO_SHARED */
+diff --git a/mlkem/src/poly.c b/mlkem/src/poly.c
+index 3a25fdfe..e3535022 100644
+--- a/mlkem/src/poly.c
++++ b/mlkem/src/poly.c
+@@ -49,7 +49,17 @@ __contract__(
+   int16_t res;
+   mlk_assert_abs_bound(&b, 1, MLKEM_Q_HALF);
+ 
++#ifdef MLK_USE_MONTMUL
++  /* Hardware Montgomery multiply (custom-0 instruction, VexiiRiscv MontMulPlugin).
++   * Emits `montmul rd, rs1, rs2` via .insn; bit-exact to mlk_montgomery_reduce(a*b). */
++  {
++    int32_t hw;
++    __asm__(".insn r 0x0B, 0, 1, %0, %1, %2" : "=r"(hw) : "r"(a), "r"(b));
++    res = (int16_t)hw;
++  }
++#else
+   res = mlk_montgomery_reduce((int32_t)a * (int32_t)b);
++#endif
+   /* Bounds:
+    * |res| <= ceil(|a| * |b| / 2^16) + (MLKEM_Q + 1) / 2
+    *       <= ceil(2^15 * ((MLKEM_Q - 1)/2) / 2^16) + (MLKEM_Q + 1) / 2
+diff --git a/mlkem/src/poly_k.c b/mlkem/src/poly_k.c
+index 99636b84..233ac39c 100644
+--- a/mlkem/src/poly_k.c
++++ b/mlkem/src/poly_k.c
+@@ -80,6 +80,7 @@ MLK_INTERNAL_API
+ void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   mlk_assert_bound_2d(a->vec, MLKEM_K, MLKEM_N, 0, MLKEM_Q);
+ 
+   for (i = 0; i < MLKEM_K; i++)
+@@ -91,6 +92,7 @@ void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
+   {
+     mlk_poly_tobytes(&r[i * MLKEM_POLYBYTES], &a->vec[i]);
+   }
++  MLK_PROF_EXIT(MLK_PB_ENCODE);
+ }
+ 
+ /* Reference: `polyvec_frombytes()` in the reference implementation @[REF]. */
+@@ -98,10 +100,12 @@ MLK_INTERNAL_API
+ void mlk_polyvec_frombytes(mlk_polyvec *r, const uint8_t a[MLKEM_POLYVECBYTES])
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_K; i++)
+   {
+     mlk_poly_frombytes(&r->vec[i], a + i * MLKEM_POLYBYTES);
+   }
++  MLK_PROF_EXIT(MLK_PB_ENCODE);
+ 
+   mlk_assert_bound_2d(r->vec, MLKEM_K, MLKEM_N, 0, MLKEM_UINT12_LIMIT);
+ }
+@@ -111,10 +115,12 @@ MLK_INTERNAL_API
+ void mlk_polyvec_ntt(mlk_polyvec *r)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_K; i++)
+   {
+     mlk_poly_ntt(&r->vec[i]);
+   }
++  MLK_PROF_EXIT(MLK_PB_NTT);
+ 
+   mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLK_NTT_BOUND);
+ }
+@@ -128,10 +134,12 @@ MLK_INTERNAL_API
+ void mlk_polyvec_invntt_tomont(mlk_polyvec *r)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_K; i++)
+   {
+     mlk_poly_invntt_tomont(&r->vec[i]);
+   }
++  MLK_PROF_EXIT(MLK_PB_NTT);
+ 
+   mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLK_INVNTT_BOUND);
+ }
+@@ -217,7 +225,11 @@ void mlk_polyvec_basemul_acc_montgomery_cached(
+   }
+ #endif /* MLK_USE_NATIVE_POLYVEC_BASEMUL_ACC_MONTGOMERY_CACHED */
+ 
+-  mlk_polyvec_basemul_acc_montgomery_cached_c(r, a, b, b_cache);
++  {
++    MLK_PROF_ENTER();
++    mlk_polyvec_basemul_acc_montgomery_cached_c(r, a, b, b_cache);
++    MLK_PROF_EXIT(MLK_PB_NTT);
++  }
+ }
+ 
+ /* Reference: Does not exist in the reference implementation @[REF].
+@@ -228,10 +240,12 @@ MLK_INTERNAL_API
+ void mlk_polyvec_mulcache_compute(mlk_polyvec_mulcache *x, const mlk_polyvec *a)
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_K; i++)
+   {
+     mlk_poly_mulcache_compute(&x->vec[i], &a->vec[i]);
+   }
++  MLK_PROF_EXIT(MLK_PB_NTT);
+ }
+ 
+ /* Reference: `polyvec_reduce()` in the reference implementation @[REF].
+diff --git a/mlkem/src/sampling.c b/mlkem/src/sampling.c
+index b6b9ff07..78bfe626 100644
+--- a/mlkem/src/sampling.c
++++ b/mlkem/src/sampling.c
+@@ -138,7 +138,13 @@ __contract__(
+   }
+ #endif /* MLK_USE_NATIVE_REJ_UNIFORM */
+ 
+-  return mlk_rej_uniform_c(r, target, offset, buf, buflen);
++  {
++    unsigned _res;
++    MLK_PROF_ENTER();
++    _res = mlk_rej_uniform_c(r, target, offset, buf, buflen);
++    MLK_PROF_EXIT(MLK_PB_SAMPLE);
++    return _res;
++  }
+ }
+ 
+ #ifndef MLKEM_GEN_MATRIX_NBLOCKS
+@@ -275,6 +281,7 @@ MLK_INTERNAL_API
+ void mlk_poly_cbd2(mlk_poly *r, const uint8_t buf[2 * MLKEM_N / 4])
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_N / 8; i++)
+   __loop__(
+     invariant(i <= MLKEM_N / 8)
+@@ -299,6 +306,7 @@ void mlk_poly_cbd2(mlk_poly *r, const uint8_t buf[2 * MLKEM_N / 4])
+       r->coeffs[8 * i + j] = (int16_t)(a - b);
+     }
+   }
++  MLK_PROF_EXIT(MLK_PB_CBD);
+ }
+ 
+ #if defined(MLK_CONFIG_MULTILEVEL_WITH_SHARED) || MLKEM_ETA1 == 3
+@@ -328,6 +336,7 @@ MLK_INTERNAL_API
+ void mlk_poly_cbd3(mlk_poly *r, const uint8_t buf[3 * MLKEM_N / 4])
+ {
+   unsigned i;
++  MLK_PROF_ENTER();
+   for (i = 0; i < MLKEM_N / 4; i++)
+   __loop__(
+     invariant(i <= MLKEM_N / 4)
+@@ -353,6 +362,7 @@ void mlk_poly_cbd3(mlk_poly *r, const uint8_t buf[3 * MLKEM_N / 4])
+       r->coeffs[4 * i + j] = (int16_t)(a - b);
+     }
+   }
++  MLK_PROF_EXIT(MLK_PB_CBD);
+ }
+ #endif /* MLK_CONFIG_MULTILEVEL_WITH_SHARED || MLKEM_ETA1 == 3 */
+ 

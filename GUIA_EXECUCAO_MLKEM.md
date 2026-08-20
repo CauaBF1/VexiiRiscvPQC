@@ -38,9 +38,58 @@ Ajuste `RISCV_PATH`/`RISCV_NAME` se sua toolchain estiver em outro lugar.
 
 ## Preparar o repositório
 
+### 1. Clonar (com submódulos)
+
 ```bash
+# clone novo, já trazendo todos os submódulos:
+git clone --recursive <url-deste-repo>
+
+# OU, se já clonou sem --recursive, inicialize os submódulos:
 git submodule update --init external/mlkem-native      # algoritmo ML-KEM-512
-git submodule update --init ext/SpinalHDL ext/rvls      # simulação (SpinalHDL do source + bindings rvls)
+git submodule update --init ext/SpinalHDL ext/rvls      # simulação (SpinalHDL + bindings rvls)
+```
+
+### 2. Trazer/atualizar o `external/mlkem-native`
+
+O submódulo fica **fixado no commit LIMPO do upstream** (pq-code-package/mlkem-native);
+o repo pai só guarda o ponteiro (SHA + URL). Para buscar/atualizar o conteúdo dele:
+
+```bash
+# checa out o commit que o repo pai fixa (o normal após clonar ou dar pull no pai):
+git submodule update --init external/mlkem-native
+
+# se quiser puxar as últimas mudanças do próprio mlkem-native (avança o ponteiro):
+git submodule update --remote external/mlkem-native
+```
+
+### 3. Aplicar nosso patch (montmul + profiling)
+
+Nossas edições no mlkem-native (o hook `.insn` da instrução **`montmul`** em
+`poly.c` **e** os brackets de profiling Keccak/NTT) **não** vivem no submódulo —
+vivem no patch versionado `external/mlkem-native.patch`, aplicado por cima do
+checkout limpo. Um único patch cobre os dois (montmul depende da mesma árvore).
+
+```bash
+make -C src/main/c/vexii/mlkem512 prep      # aplica o patch (idempotente)
+make -C src/main/c/vexii/mlkem512 unprep    # reverte o patch, se precisar
+```
+
+> - `prep` é **idempotente**: rodar de novo detecta que já está aplicado e não faz nada.
+> - Depois do `prep`, `git status` mostra `external/mlkem-native` como *modificado*
+>   (` m`) — **é esperado** (é o patch na árvore de trabalho). **Não commite o
+>   submódulo**; para status limpo, `unprep`.
+> - Se você atualizar o submódulo (passo 2) e o patch não aplicar mais, **regere-o**:
+>   `git -C external/mlkem-native diff > external/mlkem-native.patch`.
+> - Sem `make prep` o build ainda funciona, mas com o mlkem-native **de fábrica**
+>   (sem `montmul` e sem profiling — as macros ficam inertes).
+
+### 4. (opcional) Ligar a aceleração no build
+
+Com o patch aplicado, compile passando o define pra rotear `mlk_fqmul` pela
+instrução `montmul` (ver `understanding/benchmarks/montmul/`):
+
+```bash
+make -C src/main/c/vexii/mlkem512 CFLAGS_EXTRA=-DMLK_USE_MONTMUL all
 ```
 
 ---

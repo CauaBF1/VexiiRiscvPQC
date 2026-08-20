@@ -71,19 +71,61 @@ static void print_cycles(const char *label, uint64_t cycles) {
   sim_putc('\n');
 }
 
+#ifdef MLK_PROFILE
+/* Definitions for the arrays declared extern in mlk_profile.h; the
+ * mlkem_native.c TU adds into these, we snapshot/reset/print them per op. */
+uint64_t mlk_prof_cy[MLK_PB_N];
+uint32_t mlk_prof_n[MLK_PB_N];
+
+static const char *const prof_names[MLK_PB_N] = {
+  "keccak", "ntt", "sample", "cbd", "compress", "encode", "hashbytes"
+};
+
+static void prof_reset(void) {
+  for (int i = 0; i < MLK_PB_N; i++) { mlk_prof_cy[i] = 0; mlk_prof_n[i] = 0; }
+}
+
+static void prof_snapshot(uint64_t *cy, uint32_t *n) {
+  for (int i = 0; i < MLK_PB_N; i++) { cy[i] = mlk_prof_cy[i]; n[i] = mlk_prof_n[i]; }
+}
+
+static void prof_print(const char *op, const uint64_t *cy, const uint32_t *n) {
+  for (int i = 0; i < MLK_PB_N; i++) {
+    print(op); sim_putc('_'); print(prof_names[i]);
+    print("_cy=0x"); print_hex64(cy[i]); sim_putc('\n');
+    print(op); sim_putc('_'); print(prof_names[i]);
+    print("_n=0x"); print_hex64(n[i]); sim_putc('\n');
+  }
+}
+#endif
+
 /* Returns 1 on full success for this round, 0 otherwise. */
 static int run_round(uint32_t round) {
   print("round=");
   print_hex64(round);
   sim_putc('\n');
 
+#ifdef MLK_PROFILE
+  uint64_t kp_cy[MLK_PB_N], en_cy[MLK_PB_N], de_cy[MLK_PB_N];
+  uint32_t kp_n[MLK_PB_N], en_n[MLK_PB_N], de_n[MLK_PB_N];
+  prof_reset();
+#endif
   uint64_t t0 = read_cycle();
   int keypair_ret = mlkem_keypair(pk, sk);
   uint64_t t1 = read_cycle();
+#ifdef MLK_PROFILE
+  prof_snapshot(kp_cy, kp_n); prof_reset();
+#endif
   int enc_ret = mlkem_enc(ct, ss1, pk);
   uint64_t t2 = read_cycle();
+#ifdef MLK_PROFILE
+  prof_snapshot(en_cy, en_n); prof_reset();
+#endif
   int dec_ret = mlkem_dec(ss2, ct, sk);
   uint64_t t3 = read_cycle();
+#ifdef MLK_PROFILE
+  prof_snapshot(de_cy, de_n);
+#endif
 
   int ok = (keypair_ret == 0 && enc_ret == 0 && dec_ret == 0 && shared_secret_matches());
 
@@ -100,6 +142,11 @@ static int run_round(uint32_t round) {
   print_cycles("cycles_keypair", t1 - t0);
   print_cycles("cycles_enc", t2 - t1);
   print_cycles("cycles_dec", t3 - t2);
+#ifdef MLK_PROFILE
+  prof_print("keypair", kp_cy, kp_n);
+  prof_print("enc", en_cy, en_n);
+  prof_print("dec", de_cy, de_n);
+#endif
   return ok;
 }
 
