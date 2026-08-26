@@ -2,8 +2,15 @@ PROJ_NAME = mlkem512
 BENCH_ROUNDS ?= 2
 KAT ?= no
 # PROFILE=yes: per-component (Keccak vs NTT) cycle accounting via -DMLK_PROFILE.
-# Inert otherwise (macros expand to nothing; binary identical).
+# Inert otherwise (macros expand to statement-shaped no-ops and do not alter
+# the executable code; ELF debug metadata may still differ between source trees).
 PROFILE ?= no
+
+ifeq ($(KAT),yes)
+ifeq ($(PROFILE),yes)
+$(error PROFILE=yes is supported only by the benchmark main.c; use KAT=yes PROFILE=no)
+endif
+endif
 
 # repo root, relative to this makefile (src/main/c/vexii/mlkem512)
 ROOT := ../../../../..

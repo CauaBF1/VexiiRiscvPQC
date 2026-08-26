@@ -62,10 +62,10 @@ git submodule update --init external/mlkem-native
 git submodule update --remote external/mlkem-native
 ```
 
-### 3. Aplicar nosso patch (montmul + profiling)
+### 3. Aplicar nosso patch (montmul + montred + profiling)
 
-Nossas edições no mlkem-native (o hook `.insn` da instrução **`montmul`** em
-`poly.c` **e** os brackets de profiling Keccak/NTT) **não** vivem no submódulo —
+Nossas edições no mlkem-native (os hooks `.insn` de **`montmul`**/`montred`, os
+brackets de profiling Keccak/NTT e os fallbacks no-op em `common.h`) **não** vivem no submódulo —
 vivem no patch versionado `external/mlkem-native.patch`, aplicado por cima do
 checkout limpo. Um único patch cobre os dois (montmul depende da mesma árvore).
 
@@ -80,8 +80,9 @@ make -C src/main/c/vexii/mlkem512 unprep    # reverte o patch, se precisar
 >   submódulo**; para status limpo, `unprep`.
 > - Se você atualizar o submódulo (passo 2) e o patch não aplicar mais, **regere-o**:
 >   `git -C external/mlkem-native diff > external/mlkem-native.patch`.
-> - Sem `make prep` o build ainda funciona, mas com o mlkem-native **de fábrica**
->   (sem `montmul` e sem profiling — as macros ficam inertes).
+> - Sem `make prep` o build ainda funciona, mas usa o mlkem-native **de fábrica**.
+> - Com o patch e sem `-DMLK_PROFILE`, os hooks viram statements no-op: não mudam
+>   o código executável/comportamento. O ELF completo pode diferir por metadados `-g`.
 
 ### 4. (opcional) Ligar a aceleração no build
 
@@ -91,6 +92,20 @@ instrução `montmul` (ver `understanding/benchmarks/montmul/`):
 ```bash
 make -C src/main/c/vexii/mlkem512 CFLAGS_EXTRA=-DMLK_USE_MONTMUL all
 ```
+
+Para ligar as duas instruções:
+
+```bash
+make -C src/main/c/vexii/mlkem512 \
+  CFLAGS_EXTRA='-DMLK_USE_MONTMUL -DMLK_USE_MONTRED' all
+sbt "runMain vexiiriscv.execute.VexiiMontSim \
+  --load-elf src/main/c/vexii/mlkem512/build/mlkem512.elf \
+  --xlen 64 --with-rvm --with-rvc --performance-counters 0 \
+  --reset-vector 2147483648 --no-rvls-check"
+```
+
+O `TestBench` padrão não instancia essas instruções; use `VexiiMontmulSim` para
+`montmul` isolado e `VexiiMontSim` para qualquer combinação com `montred`.
 
 ---
 
@@ -274,10 +289,9 @@ python3 -m litex_boards.targets.sipeed_tang_primer_20k \
 
 ## Executar na placa Sipeed Tang Primer 20K com VexiiRiscv (via LiteX)
 
-> ℹ️ A seção abaixo é a documentação **genérica/original** (escrita antes da
-> execução real). O fluxo **provado** é o **"Executar na placa pelo vlab"** acima.
-> Onde houver divergência (ex.: `--vexii-args`, tamanho de ROM, porta serial),
-> vale o fluxo do vlab.
+> ℹ️ O fluxo **provado** é o **"Executar na placa pelo vlab"** acima. A seção
+> abaixo explica a integração e usa os mesmos defaults validados; prefira
+> `litex/tang_primer_20k/deploy.sh` para executar o procedimento.
 
 > **Este repositório NÃO instala o LiteX.** Esta seção documenta como fazer o
 > fluxo de placa. Os comandos de **simulação** acima são os validados; o fluxo
@@ -355,14 +369,12 @@ Adaptado do fluxo validado da referência, trocando o CPU de `vexriscv`
 export GOWIN_HOME=/opt/Gowin/IDE
 export PATH=$GOWIN_HOME/bin:$PATH
 
-rm -rf build/sipeed_tang_primer_20k
-
 python3 -m litex_boards.targets.sipeed_tang_primer_20k \
   --cpu-type=vexiiriscv \
   --cpu-variant=standard \
-  --vexii-args="--with-mul --with-div --allow-bypass-from=0" \
   --uart-name=serial \
-  --integrated-rom-size=0xc000 \
+  --bios-console=disable --bios-lto \
+  --integrated-rom-size=0x8000 \
   --integrated-sram-size=0x8000 \
   --integrated-main-ram-size=0x100 \
   --build \
@@ -373,7 +385,7 @@ Notas (herdadas da integração de referência):
   ativaria o caminho com DRAM).
 - `--integrated-sram-size=0x8000` deixa folga para o ML-KEM-512 e a stack.
 - `--integrated-rom-size` deve caber o BIOS + o código do ML-KEM.
-- `--vexii-args="..."` é onde entram as extensões/otimizações do core. Ex.: para
+- `--vexii-args="..."` é opcional e fica vazio no fluxo validado. Para
   experimentar bit-manipulation (ver `understanding/plano_aceleracao.md`),
   acrescente `--with-rvZbb --with-rvZba` **e** garanta que o BIOS seja compilado
   com um `-march` que inclua `zbb` (core e firmware sempre com a **mesma** ISA).
@@ -382,11 +394,11 @@ Notas (herdadas da integração de referência):
 
 ### Passo 4 — Ler a saída pela UART
 
-Em outro terminal (porta validada na referência: `/dev/ttyUSB1`):
+Em outro terminal (default validado no vlab: `/dev/ttyUSB2`; ajuste se necessário):
 ```bash
-python3 -m litex.tools.litex_term /dev/ttyUSB1 --speed 115200
+python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 # se corromper no reset/load, use raw:
-python3 -m serial.tools.miniterm /dev/ttyUSB1 115200 --raw
+python3 -m serial.tools.miniterm /dev/ttyUSB2 115200 --raw
 ```
 
 Saída esperada (formato da integração de referência):

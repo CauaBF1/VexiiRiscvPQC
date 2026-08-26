@@ -26,14 +26,16 @@ No computador onde a Tang está conectada, com o LiteX já clonado (ex.: `~/lite
 ```bash
 cd ~/VexiiRiscvPQC        # este repo
 git pull
+LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --check
 LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh
 ```
 
 O `deploy.sh` faz tudo, de forma **idempotente** (pode rodar de novo sem quebrar):
 
-1. `git submodule update --init external/mlkem-native` (git pull **não** atualiza submódulos);
-2. localiza o BIOS do LiteX sob `LITEX_DIR`;
-3. copia os arquivos ML-KEM para o BIOS;
+1. valida dependências, patches externos, BIOS e o patch do `mlkem-native` sem
+   alterar o LiteX/LiteX-Boards;
+2. inicializa o submódulo quando necessário e aplica `make prep` idempotentemente;
+3. copia os arquivos ML-KEM para o BIOS somente após o preflight passar;
 4. faz *patch* no `Makefile` do BIOS (injeta o caminho do `mlkem-native` **deste**
    repo e adiciona os objetos) e no `main.c` (chama o ML-KEM no boot) — com backup
    `*.pre-mlkem`;
@@ -42,8 +44,8 @@ O `deploy.sh` faz tudo, de forma **idempotente** (pode rodar de novo sem quebrar
 
 Ler a UART (outro terminal):
 ```bash
-python3 -m litex.tools.litex_term /dev/ttyUSB1 --speed 115200
-# se corromper: python3 -m serial.tools.miniterm /dev/ttyUSB1 115200 --raw
+python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
+# se corromper: python3 -m serial.tools.miniterm /dev/ttyUSB2 115200 --raw
 ```
 
 ### Variáveis (todas com default)
@@ -51,11 +53,12 @@ python3 -m litex.tools.litex_term /dev/ttyUSB1 --speed 115200
 |---|---|---|
 | `LITEX_DIR` | `~/litex` | raiz do LiteX clonado (contém `litex/`, `litex-boards/`, …) |
 | `CPU_VARIANT` | `standard` | variant VexiiRiscv no LiteX (`standard`/`cached`/`linux`) |
-| `VEXII_ARGS` | `--with-mul --with-div` | flags do gerador do core (ex.: `--with-rvZbb --with-rvZba`) |
-| `UART_DEV` | `/dev/ttyUSB1` | porta serial |
+| `VEXII_ARGS` | vazio | flags opcionais do gerador do core (ex.: `--with-btb --with-ras --with-gshare`) |
+| `UART_DEV` | `/dev/ttyUSB2` | porta serial observada no vlab; ajuste em outra máquina |
 
 ### Modos
 ```bash
+./litex/tang_primer_20k/deploy.sh --check     # só valida o ambiente; não copia/builda
 ./litex/tang_primer_20k/deploy.sh --install   # só instala no BIOS (sem build)
 ./litex/tang_primer_20k/deploy.sh --build     # instala + build (sem gravar)
 ./litex/tang_primer_20k/deploy.sh --all       # instala + build + load (default)
@@ -74,6 +77,10 @@ python3 -m litex.tools.litex_term /dev/ttyUSB1 --speed 115200
 - este repositório VexiiRiscv clonado (para o LiteX gerar o core via
   `sbt runMain vexiiriscv.soc.litex.SocGen`) + `sbt`/Java.
 
+O preflight **não corrige automaticamente** `core.py` nem o target da placa. Se
+os Patches 1/3 abaixo estiverem ausentes, `--check` para antes de tocar no BIOS e
+mostra qual arquivo corrigir; as alterações do BIOS só ocorrem nas ações de deploy.
+
 Ambiente Gowin típico (exporte antes de rodar, conforme sua instalação):
 ```bash
 export GOWIN_HOME=/opt/Gowin/IDE
@@ -89,6 +96,10 @@ TestBench de sim — confirmado em
 em **simulação** (rv64); a placa é **rv32** e só imprime `KAT PASS` + ciclos do
 `timer0` — serve para **corretude** e para o dado que a sim não dá: **área/Fmax**
 (do relatório de síntese do `--build`).
+
+As instruções customizadas `montmul`/`montred` ainda são injetadas apenas pelos
+Apps de simulação `VexiiMontmulSim`/`VexiiMontSim`; o KAT atual da FPGA valida o
+ML-KEM em software, não esses dois plugins RTL.
 
 > ⚠️ **Não passe `--with-mul --with-div`.** O commit pinado do VexII (mudança
 > "isamap") **rejeita** essas flags (`Unknown option`); o M já entra pela ISA do
@@ -214,10 +225,8 @@ vai para SRAM volátil (some ao desligar).
 
 ## Status
 
-- Os arquivos do BIOS são reaproveitados da integração **validada** em FPGA da
-  referência (VexRiscv 32-bit), que produziu `KAT PASS` na Tang Primer 20K.
-- O *patcher* do `deploy.sh` foi testado em sandbox (Makefile/main.c de exemplo).
-- O fluxo completo **com VexiiRiscv** ainda **não foi executado em hardware**
-  neste ambiente (sem placa/LiteX/Gowin aqui). Confira `CPU_VARIANT` e o
-  `-march`/`-mabi` do BIOS conforme o core que o LiteX gerar antes de gravar.
-```
+- O fluxo VexiiRiscv rv32im produziu `KAT PASS` na Tang Primer 20K no vlab.
+- `deploy.sh --check` valida o ambiente antes de copiar ou buildar e não altera
+  LiteX/LiteX-Boards automaticamente.
+- A validação de ciclos das instruções `montmul`/`montred` permanece na simulação
+  rv64; integração ao `SocGen`, área e Fmax desses plugins são trabalho futuro.

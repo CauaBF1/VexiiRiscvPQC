@@ -1,3 +1,56 @@
+diff --git a/mlkem/mlkem_native.c b/mlkem/mlkem_native.c
+index cf18105c..b5ba3ee4 100644
+--- a/mlkem/mlkem_native.c
++++ b/mlkem/mlkem_native.c
+@@ -217,6 +217,8 @@
+ #undef MLK_NAMESPACE_K
+ #undef MLK_NAMESPACE_PREFIX
+ #undef MLK_NAMESPACE_PREFIX_K
++#undef MLK_PROF_ENTER
++#undef MLK_PROF_EXIT
+ #undef mlk_memcpy
+ #undef mlk_memset
+ /* mlkem/src/indcpa.h */
+diff --git a/mlkem/mlkem_native_asm.S b/mlkem/mlkem_native_asm.S
+index 8cd2735d..9a8ca9b9 100644
+--- a/mlkem/mlkem_native_asm.S
++++ b/mlkem/mlkem_native_asm.S
+@@ -241,6 +241,8 @@
+ #undef MLK_NAMESPACE_K
+ #undef MLK_NAMESPACE_PREFIX
+ #undef MLK_NAMESPACE_PREFIX_K
++#undef MLK_PROF_ENTER
++#undef MLK_PROF_EXIT
+ #undef mlk_memcpy
+ #undef mlk_memset
+ /* mlkem/src/indcpa.h */
+diff --git a/mlkem/src/common.h b/mlkem/src/common.h
+index 05d67bc8..b65ce39c 100644
+--- a/mlkem/src/common.h
++++ b/mlkem/src/common.h
+@@ -20,6 +20,21 @@
+ #include "params.h"
+ #include "sys.h"
+-
++
++/* Optional project-local profiling hooks.
++ *
++ * A custom configuration may define both hooks before this point (the Vexii
++ * integration does so through mlk_profile.h). All other configurations get
++ * statement-shaped no-ops, so instrumented sources remain buildable without
++ * enabling or even knowing about the profiling buckets. */
++#if defined(MLK_PROF_ENTER) != defined(MLK_PROF_EXIT)
++#error "MLK_PROF_ENTER and MLK_PROF_EXIT must be defined together"
++#endif
++
++#if !defined(MLK_PROF_ENTER)
++#define MLK_PROF_ENTER() do { } while (0)
++#define MLK_PROF_EXIT(bucket) do { } while (0)
++#endif
++
+ /* Internal and public API have external linkage by default, but
+  * this can be overwritten by the user, e.g. for single-CU builds. */
+ #if !defined(MLK_CONFIG_INTERNAL_API_QUALIFIER)
 diff --git a/mlkem/src/compress.c b/mlkem/src/compress.c
 index 874ea1ef..4d91b77a 100644
 --- a/mlkem/src/compress.c
@@ -154,10 +207,30 @@ index 3a25fdfe..e3535022 100644
     * |res| <= ceil(|a| * |b| / 2^16) + (MLKEM_Q + 1) / 2
     *       <= ceil(2^15 * ((MLKEM_Q - 1)/2) / 2^16) + (MLKEM_Q + 1) / 2
 diff --git a/mlkem/src/poly_k.c b/mlkem/src/poly_k.c
-index 99636b84..233ac39c 100644
+index 99636b84..408df5aa 100644
 --- a/mlkem/src/poly_k.c
 +++ b/mlkem/src/poly_k.c
-@@ -80,6 +80,7 @@ MLK_INTERNAL_API
+@@ -39,6 +39,18 @@
+   MLK_ADD_PARAM_SET(mlk_polyvec_basemul_acc_montgomery_cached_c)
+ /* End of parameter set namespacing */
+-
++
++#ifdef MLK_USE_MONTRED
++/* Hardware Montgomery reduction of a full int32 (custom-0 instruction, VexiiRiscv
++ * MontRedPlugin). Emits `montred rd, rs1` via .insn; bit-exact to
++ * mlk_montgomery_reduce(a). rs2 is unused (x0). Used by the basemul accumulator. */
++static MLK_INLINE int16_t mlk_montred_hw(int32_t a)
++{
++  int32_t hw;
++  __asm__(".insn r 0x0B, 0, 2, %0, %1, x0" : "=r"(hw) : "r"(a));
++  return (int16_t)hw;
++}
++#endif
++
+ /* Reference: `polyvec_compress()` in the reference implementation @[REF]
+  *            - In contrast to the reference implementation, we assume
+  *              unsigned canonical coefficients here.
+@@ -80,6 +92,7 @@ MLK_INTERNAL_API
  void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
  {
    unsigned i;
@@ -165,7 +238,7 @@ index 99636b84..233ac39c 100644
    mlk_assert_bound_2d(a->vec, MLKEM_K, MLKEM_N, 0, MLKEM_Q);
  
    for (i = 0; i < MLKEM_K; i++)
-@@ -91,6 +92,7 @@ void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
+@@ -91,6 +104,7 @@ void mlk_polyvec_tobytes(uint8_t r[MLKEM_POLYVECBYTES], const mlk_polyvec *a)
    {
      mlk_poly_tobytes(&r[i * MLKEM_POLYBYTES], &a->vec[i]);
    }
@@ -173,7 +246,7 @@ index 99636b84..233ac39c 100644
  }
  
  /* Reference: `polyvec_frombytes()` in the reference implementation @[REF]. */
-@@ -98,10 +100,12 @@ MLK_INTERNAL_API
+@@ -98,10 +112,12 @@ MLK_INTERNAL_API
  void mlk_polyvec_frombytes(mlk_polyvec *r, const uint8_t a[MLKEM_POLYVECBYTES])
  {
    unsigned i;
@@ -186,7 +259,7 @@ index 99636b84..233ac39c 100644
  
    mlk_assert_bound_2d(r->vec, MLKEM_K, MLKEM_N, 0, MLKEM_UINT12_LIMIT);
  }
-@@ -111,10 +115,12 @@ MLK_INTERNAL_API
+@@ -111,10 +127,12 @@ MLK_INTERNAL_API
  void mlk_polyvec_ntt(mlk_polyvec *r)
  {
    unsigned i;
@@ -199,7 +272,7 @@ index 99636b84..233ac39c 100644
  
    mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLK_NTT_BOUND);
  }
-@@ -128,10 +134,12 @@ MLK_INTERNAL_API
+@@ -128,10 +146,12 @@ MLK_INTERNAL_API
  void mlk_polyvec_invntt_tomont(mlk_polyvec *r)
  {
    unsigned i;
@@ -212,7 +285,20 @@ index 99636b84..233ac39c 100644
  
    mlk_assert_abs_bound_2d(r->vec, MLKEM_K, MLKEM_N, MLK_INVNTT_BOUND);
  }
-@@ -217,7 +225,11 @@ void mlk_polyvec_basemul_acc_montgomery_cached(
+@@ -183,7 +203,12 @@ __contract__(
+       t[1] += (int32_t)a->vec[k].coeffs[2 * i] * b->vec[k].coeffs[2 * i + 1];
+       t[1] += (int32_t)a->vec[k].coeffs[2 * i + 1] * b->vec[k].coeffs[2 * i];
+     }
++#ifdef MLK_USE_MONTRED
++    r->coeffs[2 * i + 0] = mlk_montred_hw(t[0]);
++    r->coeffs[2 * i + 1] = mlk_montred_hw(t[1]);
++#else
+     r->coeffs[2 * i + 0] = mlk_montgomery_reduce(t[0]);
+     r->coeffs[2 * i + 1] = mlk_montgomery_reduce(t[1]);
++#endif
+   }
+ }
+@@ -217,7 +242,11 @@ void mlk_polyvec_basemul_acc_montgomery_cached(
    }
  #endif /* MLK_USE_NATIVE_POLYVEC_BASEMUL_ACC_MONTGOMERY_CACHED */
  
@@ -225,7 +311,7 @@ index 99636b84..233ac39c 100644
  }
  
  /* Reference: Does not exist in the reference implementation @[REF].
-@@ -228,10 +240,12 @@ MLK_INTERNAL_API
+@@ -228,10 +257,12 @@ MLK_INTERNAL_API
  void mlk_polyvec_mulcache_compute(mlk_polyvec_mulcache *x, const mlk_polyvec *a)
  {
    unsigned i;

@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* BENCH_ONLY: deterministic input makes cycle measurements reproducible.
+ * This is not a cryptographic RNG and must not be used by a production build. */
 static uint32_t rng_state = 0x12345678u;
 
 int randombytes(uint8_t *buf, size_t n) {

@@ -22,8 +22,8 @@ import vexiiriscv.tester.TestOptions
 //   0000001----------000-----0001011
 object MontMulPlugin {
   val MONTMUL = IntRegFile.TypeR(M"0000001----------000-----0001011")
-  val Q = 3329
-  val QINV = 62209
+  val Q = MontgomeryDatapath.Q
+  val QINV = MontgomeryDatapath.QINV
 }
 
 class MontMulPlugin(val layer : LaneLayer) extends ExecutionUnitElementSimple(layer) {
@@ -39,9 +39,7 @@ class MontMulPlugin(val layer : LaneLayer) extends ExecutionUnitElementSimple(la
     val process = new el.Execute(id = 0) {
       val a    = up(el(IntRegFile, RS1))(15 downto 0).asSInt                 // int16
       val b    = up(el(IntRegFile, RS2))(15 downto 0).asSInt                 // int16
-      val prod = (a * b).resize(32 bits)                                     // int32
-      val t    = (prod(15 downto 0).asUInt * U(MontMulPlugin.QINV, 16 bits))(15 downto 0).asSInt
-      val r    = (prod - (t * S(MontMulPlugin.Q, 16 bits)).resize(32 bits))(31 downto 16)
+      val r    = MontgomeryDatapath.multiply(a, b)
       wb.valid := SEL
       wb.payload := r.resize(Riscv.XLEN).asBits                             // sign-extend to XLEN
     }
