@@ -190,10 +190,11 @@ make -C src/main/c/vexii/mlkem512 clean        # limpar build do firmware
 
 ---
 
-## Executar na placa pelo vlab com `deploy.sh` ✅ VALIDADO
+## Executar Montgomery na placa pelo vlab com `deploy.sh` ✅ VALIDADO
 
-Este é o fluxo completo executado em 2026-08-26 na Tang Primer 20K. Ele produziu
-bitstream, carregou a SRAM da FPGA e terminou com `[MLKEM] KAT PASS`. O ambiente
+Este é o fluxo completo executado em 2026-08-26 e 2026-08-27 na Tang Primer
+20K. O baseline e os bitstreams com `montmul`, `montred` e ambos foram gerados,
+carregados na SRAM da FPGA e terminaram com `[MLKEM] KAT PASS`. O ambiente
 validado usa:
 
 ```text
@@ -205,7 +206,7 @@ CPU:          VexiiRiscv rv32im, 48 MHz
 UART:         /dev/ttyUSB2, 115200 8N1
 ```
 
-Commits registrados na execução de referência:
+Commits registrados na execução de referência do baseline de 2026-08-26:
 
 | componente | commit |
 |---|---|
@@ -213,15 +214,22 @@ Commits registrados na execução de referência:
 | mlkem-native | `e29c3900b81e196e09b0f0957cf29d628ba5eb56` |
 | LiteX | `97d81467881f` |
 | LiteX-Boards | `3e1d57ad189f` |
-| VexiiRiscv usado pelo gerador | `235753e24f2d960e49a0852205bae1400bf22c19` |
+| VexiiRiscv usado pelo gerador no baseline | `235753e24f2d960e49a0852205bae1400bf22c19` |
+
+Na campanha Montgomery de 2026-08-27, o gerador passou a usar este checkout via
+`MLKEM_REPO_DIR`. Seu commit exato deve ser lido no `mlkem_build_manifest.md` de
+cada configuração; o manifesto é a fonte autoritativa quando houver diferença
+em relação ao baseline histórico acima.
 
 O `deploy.sh` é o ponto de entrada recomendado. Ele valida o ambiente antes de
 alterar o BIOS, aplica o patch versionado do `mlkem-native` de forma idempotente,
 copia a integração, compila, sintetiza e opcionalmente carrega o bitstream.
 
-O baseline acima validou o ML-KEM em software. A integração dos plugins RTL ao
-`SocGen` e ao deploy foi adicionada depois dessa medição; os novos bitstreams
-Montgomery ainda precisam ser executados na placa e terão resultados separados.
+O baseline valida o ML-KEM sem instruções customizadas. A campanha de 2026-08-27
+validou na placa a integração completa dos plugins RTL ao `SocGen`, dos hooks
+`.insn` ao firmware e da seleção HW/SW ao deploy. Os resultados de ciclos estão
+registrados na seção 5; área, slack e Fmax ainda devem ser extraídos dos
+relatórios do Gowin antes de encerrar a comparação física.
 
 ### 0. Atualizar o repositório e aplicar o patch
 
@@ -357,26 +365,37 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 Não abra o canal A/JTAG como terminal serial enquanto o `openFPGALoader` estiver
 programando a placa.
 
-### 4. Build e load pelo `deploy.sh` no terminal B
+### 4. Build e load Montgomery pelo `deploy.sh` no terminal B
 
-Com o ambiente da etapa 1 ativo e a UART aguardando:
+Com o ambiente da etapa 1 ativo e a UART aguardando, o seletor aceita `none`,
+`montmul`, `montred` ou `both` e, no modo simples, ativa a mesma combinação no
+RTL e no firmware. Rode primeiro o baseline e depois as três configurações
+Montgomery, mantendo a UART aberta:
 
 ```bash
 cd ~/VexiiRiscvPQC
-MLKEM_ACCEL=none LITEX_DIR=~/litex \
-  bash litex/tang_primer_20k/deploy.sh --all
-```
-
-O seletor aceita `none`, `montmul`, `montred` ou `both` e, no modo simples,
-ativa a mesma combinação no RTL e no firmware:
-
-```bash
+MLKEM_ACCEL=none    LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montmul LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montred LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=both    LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 ```
 
-Para manter exatamente o mesmo core e isolar o efeito do código emitido:
+Cada comando gera hardware, firmware e diretório próprios:
+
+| `MLKEM_ACCEL` | plugins no core | instruções emitidas pelo firmware | diretório |
+|---|---|---|---|
+| `none` | nenhum | nenhuma | `~/litex/build/mlkem_hw_none_sw_none/` |
+| `montmul` | `MontMulPlugin` | `montmul` | `~/litex/build/mlkem_hw_montmul_sw_montmul/` |
+| `montred` | `MontRedPlugin` | `montred` | `~/litex/build/mlkem_hw_montred_sw_montred/` |
+| `both` | ambos | ambas | `~/litex/build/mlkem_hw_both_sw_both/` |
+
+O `deploy.sh` passa as opções de hardware ao `SocGen`, gera no BIOS o header com
+as opções de software, força `--no-netlist-cache` e grava no manifesto os commits,
+flags e hash do bitstream. `VEXII_ARGS` deve ficar vazio durante esta campanha.
+
+Depois da campanha casada, mantenha exatamente o mesmo core com os dois plugins
+e varie somente as instruções usadas pelo firmware. Esta é a matriz recomendada
+para isolar o efeito do código emitido:
 
 ```bash
 MLKEM_HW=both MLKEM_SW=none     LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
@@ -411,20 +430,25 @@ SRAM usage:  3.51 KiB / 32 KiB (10.96%)
 
 Novas instrumentações devem conferir se o BIOS continua cabendo em `0x8000`.
 
-### 5. Verificar a saída da placa
+### 5. Verificar a saída e comparar os ciclos
 
-O resultado validado foi:
+Para cada configuração, confirme primeiro que a UART identifica o par correto:
+
+```text
+[MLKEM] hw_accel=<none|montmul|montred|both>
+[MLKEM] sw_accel=<none|montmul|montred|both>
+```
+
+O veredito só é positivo quando todas estas linhas aparecem:
 
 ```text
 [MLKEM] ML-KEM-512 KAT start
-[MLKEM] hw_accel=none
-[MLKEM] sw_accel=none
 [MLKEM] keypair: ok
-[MLKEM] bench_keypair_cycles=935266
+[MLKEM] bench_keypair_cycles=...
 [MLKEM] encaps: ok
-[MLKEM] bench_encaps_cycles=1072913
+[MLKEM] bench_encaps_cycles=...
 [MLKEM] decaps: ok
-[MLKEM] bench_decaps_cycles=1356973
+[MLKEM] bench_decaps_cycles=...
 [MLKEM] ss self-match: ok
 [MLKEM] pk match: ok
 [MLKEM] sk match: ok
@@ -434,21 +458,68 @@ O resultado validado foi:
 [MLKEM] KAT PASS
 ```
 
-Os tempos derivados a 48 MHz são 19,485 ms para keypair, 22,352 ms para encaps
-e 28,270 ms para decaps. `BIOS CRC passed`, `Memtest OK` e o posterior
-`No boot medium found` são compatíveis com a execução: o KAT já terminou e o BIOS
-apenas não encontrou uma segunda imagem para carregar.
+Resultados da primeira campanha física Montgomery, em 2026-08-27, a 48 MHz:
 
-### 6. Recarregar sem ressintetizar
+| configuração | keypair | encaps | decaps | soma | redução contra `none` | speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| `none` | 935.924 | 1.073.320 | 1.356.983 | 3.366.227 | — | 1,000x |
+| `montmul` | 877.986 | 1.000.665 | 1.246.168 | 3.124.819 | 7,172% | 1,077x |
+| `montred` | 929.309 | 1.063.918 | 1.344.895 | 3.338.122 | 0,835% | 1,008x |
+| `both` | 875.310 | 991.781 | 1.234.637 | 3.101.728 | 7,857% | 1,085x |
 
-Com a UART aberta, é possível disparar novamente o boot usando o `.fs` existente:
+A soma considera apenas `keypair + encaps + decaps`. A configuração `both`
+economizou 264.499 ciclos, ou aproximadamente 5,510 ms a 48 MHz. `montmul`
+concentrou quase todo o ganho; acrescentar `montred` sobre `montmul` economizou
+mais 23.091 ciclos, uma redução adicional de 0,739%.
+
+Esses números confirmam corretude e desempenho para esta execução, mas não
+substituem repetições. Para o relatório, recarregue cada bitstream pelo menos
+cinco vezes, use a mediana e registre mínimo, máximo e variação percentual. Rode
+também a matriz com `MLKEM_HW=both` para separar o efeito do firmware de diferenças
+entre configurações do core.
+
+`BIOS CRC passed`, `Memtest OK` e o posterior `No boot medium found` são
+compatíveis com a execução: o KAT já terminou e o BIOS apenas não encontrou uma
+segunda imagem para carregar. A string padrão da ISA não mostra `montmul` ou
+`montred`, pois elas ocupam o espaço RISC-V `custom-0` e não são extensões
+padronizadas do `march`.
+
+### 6. Recarregar sem ressintetizar e repetir medições
+
+Com a UART aberta, é possível disparar novamente o boot usando o `.fs` existente.
+Por exemplo, para `both`:
 
 ```bash
 openFPGALoader --cable ft2232 \
-  --bitstream ~/litex/build/mlkem_hw_none_sw_none/gateware/sipeed_tang_primer_20k.fs
+  --bitstream ~/litex/build/mlkem_hw_both_sw_both/gateware/sipeed_tang_primer_20k.fs
 ```
 
-### 7. Ações disponíveis
+Exemplos válidos são `mlkem_hw_none_sw_none`, `mlkem_hw_montmul_sw_montmul`,
+`mlkem_hw_montred_sw_montred` e `mlkem_hw_both_sw_both`. Recarregar o `.fs` não
+ressintetiza o SoC e é o método indicado para medir a variação entre boots do
+mesmo bitstream.
+
+### 7. Coletar manifestos, área e timing
+
+Cada diretório contém `mlkem_build_manifest.md`. Depois da campanha, liste os
+manifestos e relatórios encontrados:
+
+```bash
+for dir in ~/litex/build/mlkem_hw_*_sw_*; do
+  echo "=== $dir ==="
+  sed -n '1,40p' "$dir/mlkem_build_manifest.md"
+  find "$dir" -type f \
+    \( -name '*.rpt' -o -name '*timing*' -o -name '*.html' \) -print
+done
+```
+
+Não conclua que o timing fechou apenas porque a UART mostra `@ 48MHz`: isso é o
+clock configurado. O relatório do Gowin deve confirmar slack, Fmax e caminho
+crítico. Compare também LUTs, registradores e BSRAM contra o baseline. Variações
+do `Memspeed` de apenas 256 bytes não devem ser tratadas como ganho ou regressão
+do ML-KEM sem repetição específica.
+
+### 8. Ações disponíveis
 
 ```bash
 LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --check
@@ -554,13 +625,16 @@ algoritmo são reaproveitados sem mudança.
 
 ### Passo 3 — Gerar e gravar o bitstream (VexiiRiscv)
 
-O `deploy.sh` chama o seguinte fluxo do LiteX. Use-o manualmente apenas para
-diagnóstico; no vlab prefira `LITEX_DIR=~/litex .../deploy.sh --all`:
+O `deploy.sh` chama o seguinte fluxo do LiteX. A expansão abaixo pressupõe que o
+BIOS já foi preparado para `HW=both, SW=both`; executá-la isoladamente com um
+header antigo pode criar hardware e firmware incompatíveis. Use-a apenas para
+diagnóstico e, no vlab, prefira `LITEX_DIR=~/litex .../deploy.sh --all`:
 
 ```bash
 # ambiente Gowin (ajuste o caminho da sua instalação)
 export GOWIN_HOME=/opt/Gowin/IDE
 export PATH=$GOWIN_HOME/bin:$PATH
+export MLKEM_REPO_DIR=~/VexiiRiscvPQC
 
 python3 -m litex_boards.targets.sipeed_tang_primer_20k \
   --cpu-type=vexiiriscv \
@@ -581,8 +655,11 @@ Notas:
   ativaria o caminho com DRAM).
 - `--integrated-sram-size=0x8000` deixa folga para o ML-KEM-512 e a stack.
 - `--integrated-rom-size` deve caber o BIOS + o código do ML-KEM.
-- `--vexii-args="..."` é opcional e fica vazio no fluxo validado. Para
-  experimentar bit-manipulation (ver `understanding/plano_aceleracao.md`),
+- O usuário deve deixar `VEXII_ARGS` vazio na campanha Montgomery; o deploy gera
+  internamente `--vexii-args="--with-montmul"`, `--with-montred` ou ambos a
+  partir de `MLKEM_HW`. Não passe essas opções manualmente, pois o header do
+  firmware também precisa corresponder ao hardware. Para experimentar
+  bit-manipulation (ver `understanding/plano_aceleracao.md`),
   acrescente `--with-rvZbb --with-rvZba` **e** garanta que o BIOS seja compilado
   com um `-march` que inclua `zbb` (core e firmware sempre com a **mesma** ISA).
 - A ISA gerada pelo core precisa casar com o `-march`/`-mabi` do BIOS. Confirme
@@ -600,6 +677,8 @@ python3 -m serial.tools.miniterm /dev/ttyUSB2 115200 --raw
 Saída esperada:
 ```text
 [MLKEM] ML-KEM-512 KAT start
+[MLKEM] hw_accel=<configuração de hardware>
+[MLKEM] sw_accel=<configuração de firmware>
 [MLKEM] bench_keypair_cycles=...
 [MLKEM] bench_encaps_cycles=...
 [MLKEM] bench_decaps_cycles=...
@@ -620,10 +699,11 @@ tempo_ms = cycles * 1000 / clock_hz
 | BIOS/ML-KEM | integração CPU-agnóstica | **a mesma** (reaproveitável) |
 | Largura | 32-bit (`rv32i…`) | 64-bit (`rv64i…`) ou 32-bit, conforme variant |
 
-> Status: o baseline rv32im a 48 MHz produziu `KAT PASS`. A integração de
-> `montmul`/`montred` ao `SocGen`, firmware e deploy está implementada e validada
-> localmente; síntese, timing, área e KAT dos novos bitstreams permanecem como a
-> próxima execução manual no vlab.
+> Status: o baseline e as configurações físicas `montmul`, `montred` e `both`
+> produziram `KAT PASS` na Tang Primer 20K a 48 MHz em 2026-08-27. A configuração
+> `both` reduziu a soma dos três trechos medidos em 7,857%. A coleta consolidada
+> de área, slack e Fmax nos relatórios do Gowin e a matriz controlada com
+> `MLKEM_HW=both` continuam pendentes.
 
 ---
 
