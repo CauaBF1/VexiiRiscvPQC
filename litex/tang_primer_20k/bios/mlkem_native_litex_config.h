@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mlkem_accel_select.h"
+
 #define MLK_CONFIG_PARAMETER_SET 512
 #define MLK_CONFIG_NAMESPACE_PREFIX mlkem
 #define MLK_CONFIG_INTERNAL_API_QUALIFIER static

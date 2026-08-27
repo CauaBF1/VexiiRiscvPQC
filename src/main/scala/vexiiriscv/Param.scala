@@ -168,6 +168,10 @@ class ParamSimple() {
   var lsuMemDataWidthMin = 32
   var withLsuBypass = false
   var withIterativeShift = false
+  // ML-KEM Montgomery custom instructions. They are opt-in so the default
+  // ParamSimple configuration and every existing SoC remain unchanged.
+  var withMontMul = false
+  var withMontRed = false
   var divRadix = 2
   var divImpl = ""
   var divArea = true
@@ -656,6 +660,8 @@ class ParamSimple() {
     if (relaxedSrc) r += "rsrc"
     if (withPerformanceCounters) r += s"pc$additionalPerformanceCounters"
     if (withIterativeShift) r += "isft"
+    if (withMontMul) r += "montmul"
+    if (withMontRed) r += "montred"
     if (withDiv) r += s"d${divRadix}${divImpl}${if(divArea)"Area" else ""}"
     if (privParam.withDebug) r += s"pdbg"
     if (embeddedJtagTap) r += s"jtagt"
@@ -711,6 +717,8 @@ class ParamSimple() {
     opt[Unit]("with-rvZcbm") action { (v, c) => addISA("zicbom"); }
     opt[Unit]("with-rvZcbm-llc") action { (v, c) => addISA("zicbom"); withRvcbmLlc = true }
     opt[Unit]("with-rvZknAes") action { (v, c) => addISA("zkne", "zknd") }
+    opt[Unit]("with-montmul") action { (v, c) => withMontMul = true }
+    opt[Unit]("with-montred") action { (v, c) => withMontRed = true }
     opt[Unit]("with-sxaia") action { (v, c) => addISA("smaia", "ssaia") }
     opt[Int]("imsic-interrupt-number") action { (v, c) => privParam.imsicInterrupts = v }
     opt[Unit]("with-whiteboxer-outputs") action { (v, c) => withWhiteboxerOutputs = true }
@@ -1015,6 +1023,8 @@ class ParamSimple() {
     plugins += new SrcPlugin(early0, executeAt = 0, relaxedRs = relaxedSrc)
     plugins += new IntAluPlugin(early0, formatAt = 0)
     plugins += shifter(early0, formatAt = relaxedShift.toInt)
+    if(withMontMul) plugins += new MontMulPlugin(early0)
+    if(withMontRed) plugins += new MontRedPlugin(early0)
     plugins += new IntFormatPlugin(lane0)
     plugins += new BranchPlugin(layer=early0, aluAt=0, jumpAt=relaxedBranch.toInt, wbAt=0)
     if(withRvZknAes) plugins += new AesZknPlugin(layer = early0)

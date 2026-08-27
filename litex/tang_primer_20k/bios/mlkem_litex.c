@@ -87,6 +87,8 @@ int litex_mlkem_kat_status(void)
 	int pass = 1;
 
 	printf("[MLKEM] ML-KEM-512 KAT start\n");
+	printf("[MLKEM] hw_accel=%s\n", MLKEM_HW_ACCEL_NAME);
+	printf("[MLKEM] sw_accel=%s\n", MLKEM_SW_ACCEL_NAME);
 	printf("[MLKEM] keypair coins[0..3]=%02x %02x %02x %02x\n",
 	       kat_keypair_coins[0], kat_keypair_coins[1],
 	       kat_keypair_coins[2], kat_keypair_coins[3]);

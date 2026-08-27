@@ -1,0 +1,84 @@
+diff --git a/litex/soc/cores/cpu/vexiiriscv/core.py b/litex/soc/cores/cpu/vexiiriscv/core.py
+--- a/litex/soc/cores/cpu/vexiiriscv/core.py
++++ b/litex/soc/cores/cpu/vexiiriscv/core.py
+@@ -46,6 +46,7 @@
+     linker_output_format = None
+ 
+     netlist_name     = None
++    generator_dir    = None
+     # vexii params controlled by litex:
+     litedram_width   = None
+     with_supervisor  = False
+@@ -278,13 +279,32 @@
+         return vexii_args
+ 
+     @staticmethod
++    def _select_generator_dir(vdir, args):
++        repo_dir = os.environ.get("MLKEM_REPO_DIR")
++        if not repo_dir:
++            raise RuntimeError("MLKEM_REPO_DIR is required by the local VexiiRiscv generator patch")
++
++        if args.update_repo != "no":
++            raise RuntimeError("MLKEM_REPO_DIR requires --update-repo=no")
++        repo_dir = os.path.realpath(repo_dir)
++        required = [
++            "build.sbt",
++            "src/main/scala/vexiiriscv/Param.scala",
++            "src/main/scala/vexiiriscv/soc/litex/Soc.scala",
++        ]
++        missing = [name for name in required if not os.path.isfile(os.path.join(repo_dir, name))]
++        if missing:
++            raise RuntimeError(f"MLKEM_REPO_DIR is not a VexiiRiscv source checkout: {repo_dir}; missing: {', '.join(missing)}")
++        print(f"MLKEM local VexiiRiscv generator: {repo_dir}")
++        return repo_dir
++
++    @staticmethod
+     def args_read(args):
+         print(args)
+ 
+         vdir = get_data_mod("cpu", "vexiiriscv").data_location
+-        ndir = os.path.join(vdir, "ext", "VexiiRiscv")
+-
+-        NaxRiscv.git_setup("VexiiRiscv", ndir, "https://github.com/SpinalHDL/VexiiRiscv.git", "dev", "235753e24f2d960e49a0852205bae1400bf22c19", args.update_repo)
++        ndir = VexiiRiscv._select_generator_dir(vdir, args)
++        VexiiRiscv.generator_dir = ndir
+ 
+         if not args.cpu_variant:
+             args.cpu_variant = "standard"
+@@ -308,8 +330,8 @@
+         vexii_args_hash = md5_hash.hexdigest()
+         ppath = os.path.join(vdir, str(vexii_args_hash) + ".py")
+         if VexiiRiscv.no_netlist_cache or not os.path.exists(ppath):
+-            cmd = f"""cd {ndir} && sbt "runMain vexiiriscv.soc.litex.PythonArgsGen {metadata_args} --python-file={str(ppath)}\""""
+-            subprocess.check_call(cmd, shell=True)
++            cmd = f"runMain vexiiriscv.soc.litex.PythonArgsGen {metadata_args} --python-file={str(ppath)}"
++            subprocess.check_call(["sbt", cmd], cwd=ndir)
+         # Loads variables like VexiiRiscv.isa_map, that set the RISC-V extensions.
+         with open(ppath) as file:
+             exec(file.read())
+@@ -509,8 +531,9 @@
+     @staticmethod
+     def generate_netlist():
+         vdir = get_data_mod("cpu", "vexiiriscv").data_location
+-        ndir = os.path.join(vdir, "ext", "VexiiRiscv")
+-        sdir = os.path.join(vdir, "ext", "SpinalHDL")
++        ndir = VexiiRiscv.generator_dir
++        if not ndir:
++            raise RuntimeError("VexiiRiscv generator directory was not selected by args_read")
+ 
+         gen_args = []
+         gen_args.append(f"--netlist-name={VexiiRiscv.netlist_name}")
+@@ -525,10 +548,10 @@
+             gen_args.append(" --device-region:{}={}".format(device, address))
+         gen_args += VexiiRiscv._get_soc_args()
+ 
+-        cmd = f"""cd {ndir} && sbt "runMain vexiiriscv.soc.litex.SocGen {" ".join(gen_args)}\""""
++        cmd = f"runMain vexiiriscv.soc.litex.SocGen {' '.join(gen_args)}"
+         print("VexiiRiscv generation command :")
+-        print(cmd)
+-        subprocess.check_call(cmd, shell=True)
++        print(f"cd {ndir} && sbt {cmd!r}")
++        subprocess.check_call(["sbt", cmd], cwd=ndir)
+ 
+ 
+     def add_sources(self, platform):

@@ -66,10 +66,10 @@ object VexiiMontmulSim extends App {
     param.addOptions(this)
   }.parse(args, ()).nonEmpty)
 
+  param.withMontMul = true
   println(s"With Vexiiriscv parm :\n - ${param.getName()}")
   val compiled = simConfig.compile {
     val pa = param.pluginsArea()
-    pa.plugins += new MontMulPlugin(pa.early0)
     ParamSimple.setPma(pa.plugins)
     VexiiRiscv(pa.plugins)
   }

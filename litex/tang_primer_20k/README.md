@@ -14,32 +14,34 @@ UART, medindo ciclos com o `timer0` do LiteX.
 ```
 
 Os arquivos do BIOS (`bios/mlkem_litex.c`, `bios/mlkem_native_litex_config.h`,
-`bios/kat_vectors.h`) são **agnósticos de CPU** — usam só APIs do LiteX
+`bios/mlkem_accel_select.h`, `bios/kat_vectors.h`) usam apenas APIs do LiteX
 (`csr.h`, `timer0`, `printf`) e as APIs *derand* do `mlkem-native`. São os mesmos
 da integração de referência (VexRiscv 32-bit); o que muda é o SoC gerado com
 `--cpu-type=vexiiriscv`.
 
-## Fluxo "git pull + 1 comando" (no PC da placa)
+## Fluxo após `git pull` (no PC da placa)
 
 No computador onde a Tang está conectada, com o LiteX já clonado (ex.: `~/litex`):
 
 ```bash
 cd ~/VexiiRiscvPQC        # este repo
 git pull
+LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --patch-litex
 LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --check
-LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh
+MLKEM_ACCEL=both LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh
 ```
 
 O `deploy.sh` faz tudo, de forma **idempotente** (pode rodar de novo sem quebrar):
 
-1. valida dependências, patches externos, BIOS e o patch do `mlkem-native` sem
-   alterar o LiteX/LiteX-Boards;
-2. inicializa o submódulo quando necessário e aplica `make prep` idempotentemente;
-3. copia os arquivos ML-KEM para o BIOS somente após o preflight passar;
-4. faz *patch* no `Makefile` do BIOS (injeta o caminho do `mlkem-native` **deste**
+1. pela ação explícita `--patch-litex`, faz o wrapper usar este checkout do
+   VexiiRiscv (com backup e sem atualizar repositórios pela rede);
+2. valida dependências, patches externos, BIOS e o patch do `mlkem-native`;
+3. inicializa o submódulo quando necessário e aplica `make prep` idempotentemente;
+4. copia os arquivos ML-KEM e a configuração HW/SW para o BIOS;
+5. faz *patch* no `Makefile` do BIOS (injeta o caminho do `mlkem-native` **deste**
    repo e adiciona os objetos) e no `main.c` (chama o ML-KEM no boot) — com backup
    `*.pre-mlkem`;
-5. gera o SoC VexiiRiscv e grava na placa
+6. gera o SoC VexiiRiscv e grava na placa
    (`--cpu-type=vexiiriscv --build --load`).
 
 Ler a UART (outro terminal):
@@ -54,11 +56,15 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 | `LITEX_DIR` | `~/litex` | raiz do LiteX clonado (contém `litex/`, `litex-boards/`, …) |
 | `CPU_VARIANT` | `standard` | variant VexiiRiscv no LiteX (`standard`/`cached`/`linux`) |
 | `VEXII_ARGS` | vazio | flags opcionais do gerador do core (ex.: `--with-btb --with-ras --with-gshare`) |
+| `MLKEM_ACCEL` | `none` | atalho que seleciona `none`, `montmul`, `montred` ou `both` no HW e SW |
+| `MLKEM_HW`/`MLKEM_SW` | — | modo avançado; devem ser informados juntos e o SW deve ser subconjunto do HW |
+| `MLKEM_BUILD_DIR` | automático | sobrescreve `~/litex/build/mlkem_hw_<HW>_sw_<SW>` |
 | `UART_DEV` | `/dev/ttyUSB2` | porta serial observada no vlab; ajuste em outra máquina |
 
 ### Modos
 ```bash
 ./litex/tang_primer_20k/deploy.sh --check     # só valida o ambiente; não copia/builda
+./litex/tang_primer_20k/deploy.sh --patch-litex # patch explícito do core.py externo
 ./litex/tang_primer_20k/deploy.sh --install   # só instala no BIOS (sem build)
 ./litex/tang_primer_20k/deploy.sh --build     # instala + build (sem gravar)
 ./litex/tang_primer_20k/deploy.sh --all       # instala + build + load (default)
@@ -77,9 +83,9 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 - este repositório VexiiRiscv clonado (para o LiteX gerar o core via
   `sbt runMain vexiiriscv.soc.litex.SocGen`) + `sbt`/Java.
 
-O preflight **não corrige automaticamente** `core.py` nem o target da placa. Se
-os Patches 1/3 abaixo estiverem ausentes, `--check` para antes de tocar no BIOS e
-mostra qual arquivo corrigir; as alterações do BIOS só ocorrem nas ações de deploy.
+O preflight não modifica checkouts externos. O patch que seleciona este gerador
+é aplicado somente por `--patch-litex`; as correções legadas das flags e do reset
+da placa continuam detectadas, mas não são aplicadas automaticamente.
 
 Ambiente Gowin típico (exporte antes de rodar, conforme sua instalação):
 ```bash
@@ -97,9 +103,10 @@ em **simulação** (rv64); a placa é **rv32** e só imprime `KAT PASS` + ciclos
 `timer0` — serve para **corretude** e para o dado que a sim não dá: **área/Fmax**
 (do relatório de síntese do `--build`).
 
-As instruções customizadas `montmul`/`montred` ainda são injetadas apenas pelos
-Apps de simulação `VexiiMontmulSim`/`VexiiMontSim`; o KAT atual da FPGA valida o
-ML-KEM em software, não esses dois plugins RTL.
+As instruções `montmul`/`montred` agora são opções de `ParamSimple` e chegam ao
+`SocGen` por `--with-montmul`/`--with-montred`. Use os seletores `MLKEM_*` do
+deploy: passar essas flags diretamente em `VEXII_ARGS` é rejeitado para impedir
+hardware e firmware divergentes.
 
 > ⚠️ **Não passe `--with-mul --with-div`.** O commit pinado do VexII (mudança
 > "isamap") **rejeita** essas flags (`Unknown option`); o M já entra pela ISA do
@@ -147,86 +154,71 @@ inclua `_zbb` (core e firmware sempre com a mesma ISA). Combinável com o sweet-
 
 ---
 
-## Executar no vlab (passo a passo validado)
+## Executar no vlab
 
-Fluxo **realmente executado** (deu `KAT PASS` na Tang Primer 20K), resumido de
-`GUIA_EXECUCAO_MLKEM.md` + `understanding/done_execucao_vexii_vlab.md`. Pressupõe a
-conta `caua` do vlab já preparada: repo em `~/VexiiRiscvPQC`, LiteX em `~/litex` com
-venv `~/litex-env` e os **patches aplicados**, Gowin instalado, placa conectada.
+O baseline `none` já produziu `KAT PASS` na placa. A campanha abaixo mantém
+rv32im, 48 MHz, ROM/SRAM e firmware determinístico; somente os seletores
+Montgomery variam.
 
-> ⚠️ Na placa o VexII sai **rv32im** (variant `standard` do LiteX é 32-bit). O
-> ML-KEM roda e valida igual (KAT PASS). Não há contagem de ciclos comparável à sim
-> (xlen e memória diferentes) — o valor aqui é **corretude** + **área/Fmax**.
+**1. Preparar o ambiente e o gerador local:**
 
-**0. Entrar e preparar o ambiente** (o Gowin precisa do `LD_PRELOAD` do freetype):
 ```bash
-ssh vlab                     
-cd ~/litex
+ssh vlab
+cd ~/VexiiRiscvPQC
+git pull --ff-only origin dev
+git submodule update --init --recursive
+
 source ~/litex-env/bin/activate
-export PYTHONPATH=$PWD/litex:$PWD/litex-boards
+export PYTHONPATH="$HOME/litex/litex:$HOME/litex/litex-boards"
 export GOWIN_HOME=/var/local/Gowin_V1.9.10.03_Education_linux/IDE
-export PATH=$GOWIN_HOME/bin:$PATH
+export PATH="$GOWIN_HOME/bin:$PATH"
 export LD_PRELOAD=/lib/x86_64-linux-gnu/libfreetype.so.6
+
+LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --patch-litex
+LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --check
 ```
 
-**1. Abrir a UART ANTES de gravar** (terminal A) — o ML-KEM imprime **uma vez no
-boot**; o console é o canal B do FT2232 → `/dev/ttyUSB2`:
+**2. Abrir a UART antes de gravar:**
+
 ```bash
+cd /
 source ~/litex-env/bin/activate
-python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
-# sem /dev/ttyUSB*?  sudo modprobe -r ftdi_sio && sudo modprobe ftdi_sio  (ou replug do cabo)
+python3 -m serial.tools.miniterm /dev/ttyUSB2 115200 --raw
 ```
 
-**2. Reaplicar os patches do LiteX** (só se o `~/litex` for novo — senão pule):
+**3. Executar as quatro configurações casadas, uma por vez:**
+
 ```bash
-# Patch 1 — remove --with-mul/--with-div (isamap rejeita), mantém o bypass
-sed -i 's/ --with-mul --with-div --allow-bypass-from=0/ --allow-bypass-from=0/' \
-  ~/litex/litex/litex/soc/cores/cpu/vexiiriscv/core.py
-# Patch 3 — remove 2º driver de sys_rst (GowinSynthesis rejeita multi-driver)
-sed -i 's@self.specials += AsyncResetSynchronizer(self.cd_sys, ~pll.locked | self.rst | self.reset)@#&@' \
-  ~/litex/litex-boards/litex_boards/targets/sipeed_tang_primer_20k.py
-pip3 install meson ninja   # Patch 2 (dependência de build do BIOS)
+MLKEM_ACCEL=none     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=montmul  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=montred  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=both     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 ```
 
-**3. Build + load (terminal B)** — é aqui que o **sweet-spot** entra, via
-`--vexii-args` adicionado ao comando validado:
+Para comparar somente o código emitido mantendo ambos os plugins no core:
+
 ```bash
-cd ~/litex
-python3 -m litex_boards.targets.sipeed_tang_primer_20k \
-  --cpu-type=vexiiriscv --cpu-variant=standard --uart-name=serial \
-  --vexii-args="--with-btb --with-ras --with-gshare" \
-  --bios-console=disable --bios-lto \
-  --integrated-rom-size=0x8000 --integrated-sram-size=0x8000 \
-  --integrated-main-ram-size=0x100 \
-  --build --load
+MLKEM_HW=both MLKEM_SW=none     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=both MLKEM_SW=montmul  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=both MLKEM_SW=montred  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=both MLKEM_SW=both     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 ```
-- **Sem sweet-spot** (baseline validado): apagar a linha `--vexii-args=...`.
-- **Só medir área/Fmax** (sem placa): trocar `--build --load` por `--build` e ler
-  o relatório de síntese Gowin em `build/sipeed_tang_primer_20k/`.
-- **Re-gravar** um `.fs` já gerado (rápido, não recompila):
-  ```bash
-  openFPGALoader --cable ft2232 \
-    --bitstream ~/litex/build/sipeed_tang_primer_20k/gateware/sipeed_tang_primer_20k.fs
-  ```
 
-**4. Verificar no terminal A:**
-```text
-[MLKEM] ML-KEM-512 KAT start
-[MLKEM] bench_keypair_cycles=...
-[MLKEM] KAT PASS
+Cada combinação fica em `~/litex/build/mlkem_hw_<HW>_sw_<SW>/` e contém
+`mlkem_build_manifest.md`. Na UART, confirme `hw_accel`, `sw_accel`, todos os
+matches, `status=0x00f00d` e `KAT PASS`. Leia área/Fmax nos relatórios listados
+no manifesto.
+
+Rollback somente do patch deste projeto:
+
+```bash
+git -C ~/litex/litex apply --reverse \
+  ~/VexiiRiscvPQC/litex/tang_primer_20k/patches/vexiiriscv_local_generator.patch
 ```
-`KAT PASS` = pk/sk/ct/ss bateram byte-a-byte com o sweet-spot ativo. O bitstream
-vai para SRAM volátil (some ao desligar).
-
-> Alternativa: o `deploy.sh` deste repo automatiza o patch do BIOS e chama o mesmo
-> target — mas o fluxo **provado** é o manual acima. Se usar o `deploy.sh`, passe o
-> sweet-spot por `VEXII_ARGS="--with-btb --with-ras --with-gshare"` (sem mul/div) e
-> garanta que os Patches 1/3 do LiteX estão aplicados.
 
 ## Status
 
 - O fluxo VexiiRiscv rv32im produziu `KAT PASS` na Tang Primer 20K no vlab.
-- `deploy.sh --check` valida o ambiente antes de copiar ou buildar e não altera
-  LiteX/LiteX-Boards automaticamente.
-- A validação de ciclos das instruções `montmul`/`montred` permanece na simulação
-  rv64; integração ao `SocGen`, área e Fmax desses plugins são trabalho futuro.
+- `montmul`/`montred` estão integrados ao parser, `SocGen`, firmware e deploy.
+- A validação formal e o teste RTL local passam; área, Fmax, ciclos e KAT dos
+  bitstreams acelerados ainda precisam ser preenchidos após a campanha no vlab.
