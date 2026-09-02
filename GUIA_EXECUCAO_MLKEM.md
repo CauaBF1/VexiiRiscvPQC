@@ -15,6 +15,7 @@ VexRiscv→VexiiRiscv, ver `understanding/implementacao_inicial_vexii.md`.
 ## Dependências
 
 - `git`, `make`, `python3`
+- `gcc`, `gprof` e `gdb` GNU no host Linux/glibc (campanha de profiling hospedada)
 - `sbt` + Java (OpenJDK 17+)
 - `verilator` (≥ 5.x), `g++`
 - Toolchain bare-metal RISC-V 64-bit com newlib, ex.:
@@ -139,6 +140,81 @@ done
 ```
 `ss_match=0x1` indica que o shared secret encapsulado e o decapsulado bateram.
 Para mudar o número de rodadas: `BENCH_ROUNDS=30`.
+
+---
+
+## Descobrir alvos de aceleração com GCC + GPROF + GDB
+
+O profiling GNU é executado no **PC host**, não no firmware bare-metal. A
+toolchain RISC-V desta configuração não possui o runtime `gmon`
+(`gcrt0.o`/`libgmon.a` e `_mcount`) necessário ao `-pg`. Portanto, o método é
+híbrido:
+
+1. GCC e GPROF localizam funções quentes e relações de chamada na mesma
+   implementação C portátil do ML-KEM-512;
+2. GDB confirma símbolos, fonte e assembly dos candidatos;
+3. os buckets `rdcycle` e o KAT no Vexii confirmam se o candidato também é
+   relevante e correto na arquitetura RV32/RV64.
+
+O harness está em `src/main/c/host/mlkem512_gprof/`. Execute a partir da raiz:
+
+```bash
+# ambiente, versões, commits, patch e disponibilidade de moncontrol()
+make -C src/main/c/host/mlkem512_gprof check
+
+# testes do parser e compilação das quatro variantes
+make -C src/main/c/host/mlkem512_gprof test
+make -C src/main/c/host/mlkem512_gprof build
+
+# campanha recomendada: 5 s por amostra, 3 repetições por operação/variante
+make -C src/main/c/host/mlkem512_gprof profile \
+  PROFILE_SECONDS=5 PROFILE_RUNS=3
+
+# normaliza resultados e gera ranking, tabelas e inspeções GDB
+make -C src/main/c/host/mlkem512_gprof report
+```
+
+Cada execução mede separadamente `keypair`, `encaps`, `decaps` e o fluxo `all`.
+Setup, warmup e validação ficam fora da janela do `gprof` por meio de
+`moncontrol(0/1)`. As entradas são determinísticas e cada processo verifica o
+shared secret antes de retornar `PASS`.
+
+As quatro variantes têm papéis diferentes:
+
+| variante | backend/flags | uso correto |
+|---|---|---|
+| `c-os` | C portátil, `-Os -g -pg` | ranking principal; mais próximo do firmware Vexii otimizado para tamanho |
+| `c-o2` | C portátil, `-O2 -g -pg` | verificar sensibilidade ao otimizador |
+| `c-noinline` | C portátil, `-O2 -pg -fno-inline...` | revelar `mlk_fqmul`, reduções e contagens escondidas por inlining; não comparar seu tempo como desempenho |
+| `native-o2` | backend nativo x86/AVX2 | controle de viés do host; nunca projetar o ganho RV32 a partir dele |
+
+Os resultados privados ficam em
+`understanding/benchmarks/gprof/<AAAAMMDD-HHMMSS>/`. O `manifest.json` registra
+commits, ferramentas, flags, hashes e todas as execuções. Em cada pasta há o
+ELF/biblioteca arquivados, `gmon` bruto, stdout, flat profile, call graph e perfil
+por linha; na raiz ficam `REPORT.md`, `candidates.csv/json` e `gdb/`.
+
+Para inspecionar manualmente uma função do relatório:
+
+```bash
+make -C src/main/c/host/mlkem512_gprof inspect \
+  SYMBOL=mlk_fqmul
+```
+
+Se houver um ELF RISC-V já compilado e `riscv64-unknown-elf-gdb` estiver no
+`PATH`, também é possível correlacionar símbolos ao gerar o relatório:
+
+```bash
+make -C src/main/c/host/mlkem512_gprof report \
+  RISCV_ELF="$PWD/src/main/c/vexii/mlkem512/build/mlkem512.elf"
+```
+
+Interprete `self %` como participação no tempo amostrado **daquele binário no
+host**. `primary-hotspot` é visível no C `-Os`; `structural-noinline` só ficou
+isolável sem inlining. O score de candidato mistura tempo, frequência,
+reutilização e duas heurísticas de hardware: ele ajuda a priorizar inspeção, mas
+não autoriza sozinho um novo plugin RTL. A confirmação final continua sendo
+assembly/ciclos no Vexii, KAT, síntese, área e Fmax.
 
 ---
 
