@@ -172,6 +172,9 @@ class ParamSimple() {
   // ParamSimple configuration and every existing SoC remain unchanged.
   var withMontMul = false
   var withMontRed = false
+  // Stateful Keccak-f[1600] custom-2 accelerator. Kept opt-in so existing
+  // configurations do not gain a 1,600-bit state bank or custom opcodes.
+  var withKeccak = false
   var divRadix = 2
   var divImpl = ""
   var divArea = true
@@ -662,6 +665,7 @@ class ParamSimple() {
     if (withIterativeShift) r += "isft"
     if (withMontMul) r += "montmul"
     if (withMontRed) r += "montred"
+    if (withKeccak) r += "keccak"
     if (withDiv) r += s"d${divRadix}${divImpl}${if(divArea)"Area" else ""}"
     if (privParam.withDebug) r += s"pdbg"
     if (embeddedJtagTap) r += s"jtagt"
@@ -719,6 +723,7 @@ class ParamSimple() {
     opt[Unit]("with-rvZknAes") action { (v, c) => addISA("zkne", "zknd") }
     opt[Unit]("with-montmul") action { (v, c) => withMontMul = true }
     opt[Unit]("with-montred") action { (v, c) => withMontRed = true }
+    opt[Unit]("with-keccak") action { (v, c) => withKeccak = true }
     opt[Unit]("with-sxaia") action { (v, c) => addISA("smaia", "ssaia") }
     opt[Int]("imsic-interrupt-number") action { (v, c) => privParam.imsicInterrupts = v }
     opt[Unit]("with-whiteboxer-outputs") action { (v, c) => withWhiteboxerOutputs = true }
@@ -1025,6 +1030,7 @@ class ParamSimple() {
     plugins += shifter(early0, formatAt = relaxedShift.toInt)
     if(withMontMul) plugins += new MontMulPlugin(early0)
     if(withMontRed) plugins += new MontRedPlugin(early0)
+    if(withKeccak) plugins += new KeccakPlugin(early0)
     plugins += new IntFormatPlugin(lane0)
     plugins += new BranchPlugin(layer=early0, aluAt=0, jumpAt=relaxedBranch.toInt, wbAt=0)
     if(withRvZknAes) plugins += new AesZknPlugin(layer = early0)

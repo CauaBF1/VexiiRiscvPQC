@@ -1,4 +1,4 @@
-OUTPUT_FORMAT("elf64-littleriscv", "elf64-littleriscv", "elf64-littleriscv")
+/* Let the GCC driver's -mabi/-march select elf32 or elf64. */
 OUTPUT_ARCH(riscv)
 ENTRY(crtStart)
 

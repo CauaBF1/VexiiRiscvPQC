@@ -43,7 +43,7 @@ LDSCRIPT = ./src/linker.ld
 RISCV_NAME ?= riscv64-unknown-elf
 RISCV_PATH ?= /home/borgescaua/opt/riscv-elf-multilib
 
-MABI  := lp64
+MABI  ?= lp64
 # rv64: 'm' for Kyber mul, 'c' matches newlib multilib, zicsr for rdcycle.
 # Overridable so the accel experiments can pass e.g. rv64imac_zba_zbb_zicsr.
 MARCH ?= rv64imac_zicsr

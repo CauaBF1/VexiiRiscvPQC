@@ -7,7 +7,12 @@
 #define MLK_CONFIG_PARAMETER_SET 512
 #define MLK_CONFIG_NAMESPACE_PREFIX mlkem
 #define MLK_CONFIG_INTERNAL_API_QUALIFIER static
+#if defined(MLK_USE_KECCAK)
+#define MLK_CONFIG_USE_NATIVE_BACKEND_FIPS202
+#define MLK_CONFIG_FIPS202_BACKEND_FILE "mlkem_keccak_vexii.h"
+#else
 #define MLK_CONFIG_NO_ASM
+#endif
 #define MLK_CONFIG_CUSTOM_ZEROIZE
 
 /* Per-component profiling hooks (inert unless -DMLK_PROFILE). Pulled in here so

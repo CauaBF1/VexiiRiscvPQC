@@ -14,7 +14,8 @@ UART, medindo ciclos com o `timer0` do LiteX.
 ```
 
 Os arquivos do BIOS (`bios/mlkem_litex.c`, `bios/mlkem_native_litex_config.h`,
-`bios/mlkem_accel_select.h`, `bios/kat_vectors.h`) usam apenas APIs do LiteX
+`bios/mlkem_accel_select.h`, `bios/kat_vectors.h`) e o backend compartilhado
+`src/main/c/vexii/mlkem512/src/mlkem_keccak_vexii.h` usam apenas APIs do LiteX
 (`csr.h`, `timer0`, `printf`) e as APIs *derand* do `mlkem-native`. São os mesmos
 da integração de referência (VexRiscv 32-bit); o que muda é o SoC gerado com
 `--cpu-type=vexiiriscv`.
@@ -28,7 +29,7 @@ cd ~/VexiiRiscvPQC        # este repo
 git pull
 LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --patch-litex
 LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --check
-MLKEM_ACCEL=both LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh
+MLKEM_ACCEL=all LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh
 ```
 
 O `deploy.sh` faz tudo, de forma **idempotente** (pode rodar de novo sem quebrar):
@@ -56,7 +57,7 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 | `LITEX_DIR` | `~/litex` | raiz do LiteX clonado (contém `litex/`, `litex-boards/`, …) |
 | `CPU_VARIANT` | `standard` | variant VexiiRiscv no LiteX (`standard`/`cached`/`linux`) |
 | `VEXII_ARGS` | vazio | flags opcionais do gerador do core (ex.: `--with-btb --with-ras --with-gshare`) |
-| `MLKEM_ACCEL` | `none` | atalho que seleciona `none`, `montmul`, `montred` ou `both` no HW e SW |
+| `MLKEM_ACCEL` | `none` | seleciona `none`, `montmul`, `montred`, `both`, `keccak`, `montmul-keccak`, `montred-keccak` ou `all` no HW e SW |
 | `MLKEM_HW`/`MLKEM_SW` | — | modo avançado; devem ser informados juntos e o SW deve ser subconjunto do HW |
 | `MLKEM_BUILD_DIR` | automático | sobrescreve `~/litex/build/mlkem_hw_<HW>_sw_<SW>` |
 | `UART_DEV` | `/dev/ttyUSB2` | porta serial observada no vlab; ajuste em outra máquina |
@@ -103,10 +104,13 @@ em **simulação** (rv64); a placa é **rv32** e só imprime `KAT PASS` + ciclos
 `timer0` — serve para **corretude** e para o dado que a sim não dá: **área/Fmax**
 (do relatório de síntese do `--build`).
 
-As instruções `montmul`/`montred` agora são opções de `ParamSimple` e chegam ao
-`SocGen` por `--with-montmul`/`--with-montred`. Use os seletores `MLKEM_*` do
-deploy: passar essas flags diretamente em `VEXII_ARGS` é rejeitado para impedir
-hardware e firmware divergentes.
+As instruções `montmul`/`montred` e a unidade stateful Keccak-f[1600] são opções
+de `ParamSimple` e chegam ao `SocGen` por `--with-montmul`, `--with-montred` e
+`--with-keccak`. O Keccak usa quatro instruções em `custom-2`: KWRITE/KREAD
+transferem as 50 palavras de 32 bits, KPERM executa 24 rodadas e KCLEAR apaga o
+estado interno. Use os seletores `MLKEM_*` do deploy: passar essas flags
+diretamente em `VEXII_ARGS` é rejeitado para impedir hardware e firmware
+divergentes.
 
 > ⚠️ **Não passe `--with-mul --with-div`.** O commit pinado do VexII (mudança
 > "isamap") **rejeita** essas flags (`Unknown option`); o M já entra pela ISA do
@@ -157,8 +161,8 @@ inclua `_zbb` (core e firmware sempre com a mesma ISA). Combinável com o sweet-
 ## Executar no vlab
 
 O baseline `none` já produziu `KAT PASS` na placa. A campanha abaixo mantém
-rv32im, 48 MHz, ROM/SRAM e firmware determinístico; somente os seletores
-Montgomery variam.
+rv32im, 48 MHz, ROM/SRAM e firmware determinístico; somente os seletores dos
+aceleradores variam.
 
 **1. Preparar o ambiente e o gerador local:**
 
@@ -186,13 +190,15 @@ source ~/litex-env/bin/activate
 python3 -m serial.tools.miniterm /dev/ttyUSB2 115200 --raw
 ```
 
-**3. Executar as quatro configurações casadas, uma por vez:**
+**3. Executar as configurações principais, uma por vez:**
 
 ```bash
 MLKEM_ACCEL=none     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montmul  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montred  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=both     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=keccak   LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=all      LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 ```
 
 Para comparar somente o código emitido mantendo ambos os plugins no core:
@@ -202,6 +208,14 @@ MLKEM_HW=both MLKEM_SW=none     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy
 MLKEM_HW=both MLKEM_SW=montmul  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 MLKEM_HW=both MLKEM_SW=montred  LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 MLKEM_HW=both MLKEM_SW=both     LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+```
+
+Para isolar Keccak mantendo exatamente o mesmo hardware completo:
+
+```bash
+MLKEM_HW=all MLKEM_SW=both      LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=all MLKEM_SW=keccak    LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=all MLKEM_SW=all       LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 ```
 
 Cada combinação fica em `~/litex/build/mlkem_hw_<HW>_sw_<SW>/` e contém
@@ -220,5 +234,9 @@ git -C ~/litex/litex apply --reverse \
 
 - O fluxo VexiiRiscv rv32im produziu `KAT PASS` na Tang Primer 20K no vlab.
 - `montmul`/`montred` estão integrados ao parser, `SocGen`, firmware e deploy.
-- A validação formal e o teste RTL local passam; área, Fmax, ciclos e KAT dos
-  bitstreams acelerados ainda precisam ser preenchidos após a campanha no vlab.
+- Keccak está integrado ao parser, RTL, hook FIPS-202 x1, firmware e deploy; os
+  testes diferenciais e KAT local passam. Em simulação, `keccak` atingiu `1,252x`
+  e `all` `1,597x` contra o baseline pela mediana de cinco execuções.
+- Área, Fmax, ciclos e KAT dos bitstreams Keccak ainda precisam ser preenchidos
+  após a campanha no vlab; o clock impresso na UART não substitui o relatório de
+  timing do Gowin.

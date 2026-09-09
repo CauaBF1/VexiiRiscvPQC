@@ -1,7 +1,8 @@
 /* Per-component cycle profiling for ML-KEM (indexed buckets).
  *
  * All inert unless -DMLK_PROFILE is set: the macros expand to nothing, so the
- * normal build is byte-identical. Included from mlkem_native_vexii_config.h so
+ * normal executable code and behavior are unchanged. Included from
+ * mlkem_native_vexii_config.h so
  * the macros are visible across the whole amalgamated mlkem_native.c TU, where
  * the primitives are static and otherwise un-hookable. The mlk_prof_* arrays
  * are defined in main.c; the SCU accumulates, main.c snapshots/resets/prints.

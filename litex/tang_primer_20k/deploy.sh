@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Deploy reproducível do ML-KEM-512 no BIOS LiteX da Sipeed Tang Primer 20K.
-# O hardware e o firmware Montgomery podem ser selecionados separadamente, mas
+# O hardware e o firmware dos aceleradores podem ser selecionados separadamente, mas
 # o firmware nunca pode emitir uma instrução ausente no core.
 #
 # Exemplos:
 #   LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --patch-litex
 #   LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --check
-#   MLKEM_ACCEL=montmul LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
-#   MLKEM_HW=both MLKEM_SW=montred LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+#   MLKEM_ACCEL=keccak LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
+#   MLKEM_HW=all MLKEM_SW=both LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 set -euo pipefail
 
 ACTION="${1:---all}" # --patch-litex | --check | --install | --build | --all
@@ -31,6 +31,23 @@ case "$ACTION" in
   *) die "ação desconhecida: $ACTION (use --patch-litex, --check, --install, --build ou --all)" ;;
 esac
 
+valid_accel_config() {
+  case "$1" in
+    none|montmul|montred|both|keccak|montmul-keccak|montred-keccak|all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+config_has_feature() {
+  local config="$1" feature="$2"
+  case "$feature:$config" in
+    montmul:montmul|montmul:both|montmul:montmul-keccak|montmul:all) return 0 ;;
+    montred:montred|montred:both|montred:montred-keccak|montred:all) return 0 ;;
+    keccak:keccak|keccak:montmul-keccak|keccak:montred-keccak|keccak:all) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 resolve_accel_config() {
   local accel_was_set=0 hw_was_set=0 sw_was_set=0 selected
   [ "${MLKEM_ACCEL+x}" = x ] && accel_was_set=1
@@ -53,30 +70,27 @@ resolve_accel_config() {
     MLKEM_SW_VALUE="$selected"
   fi
 
-  case "$MLKEM_HW_VALUE" in none|montmul|montred|both) ;; *) die "MLKEM_HW inválido: $MLKEM_HW_VALUE" ;; esac
-  case "$MLKEM_SW_VALUE" in none|montmul|montred|both) ;; *) die "MLKEM_SW inválido: $MLKEM_SW_VALUE" ;; esac
+  valid_accel_config "$MLKEM_HW_VALUE" || die "MLKEM_HW inválido: $MLKEM_HW_VALUE"
+  valid_accel_config "$MLKEM_SW_VALUE" || die "MLKEM_SW inválido: $MLKEM_SW_VALUE"
 
-  if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--with-mont(mul|red)($|[=[:space:]]) ]]; then
-    die "não passe --with-montmul/--with-montred em VEXII_ARGS; use MLKEM_ACCEL ou MLKEM_HW"
+  if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--with-(montmul|montred|keccak)($|[=[:space:]]) ]]; then
+    die "não passe --with-montmul/--with-montred/--with-keccak em VEXII_ARGS; use MLKEM_ACCEL ou MLKEM_HW"
   fi
 
-  case "$MLKEM_SW_VALUE" in
-    montmul) [[ "$MLKEM_HW_VALUE" == montmul || "$MLKEM_HW_VALUE" == both ]] \
-      || die "firmware montmul exige hardware montmul ou both" ;;
-    montred) [[ "$MLKEM_HW_VALUE" == montred || "$MLKEM_HW_VALUE" == both ]] \
-      || die "firmware montred exige hardware montred ou both" ;;
-    both) [ "$MLKEM_HW_VALUE" = both ] || die "firmware both exige hardware both" ;;
-  esac
+  local feature
+  for feature in montmul montred keccak; do
+    if config_has_feature "$MLKEM_SW_VALUE" "$feature" && ! config_has_feature "$MLKEM_HW_VALUE" "$feature"; then
+      die "firmware $MLKEM_SW_VALUE exige a feature $feature no hardware $MLKEM_HW_VALUE"
+    fi
+  done
 
-  case "$MLKEM_HW_VALUE" in
-    none)     MLKEM_HW_VEXII_ARGS="" ;;
-    montmul)  MLKEM_HW_VEXII_ARGS="--with-montmul" ;;
-    montred)  MLKEM_HW_VEXII_ARGS="--with-montred" ;;
-    both)     MLKEM_HW_VEXII_ARGS="--with-montmul --with-montred" ;;
-  esac
+  MLKEM_HW_VEXII_ARGS=()
+  config_has_feature "$MLKEM_HW_VALUE" montmul && MLKEM_HW_VEXII_ARGS+=(--with-montmul)
+  config_has_feature "$MLKEM_HW_VALUE" montred && MLKEM_HW_VEXII_ARGS+=(--with-montred)
+  config_has_feature "$MLKEM_HW_VALUE" keccak && MLKEM_HW_VEXII_ARGS+=(--with-keccak)
   VEXII_EFFECTIVE_ARGS="$VEXII_ARGS"
-  if [ -n "$MLKEM_HW_VEXII_ARGS" ]; then
-    VEXII_EFFECTIVE_ARGS="${VEXII_EFFECTIVE_ARGS:+$VEXII_EFFECTIVE_ARGS }$MLKEM_HW_VEXII_ARGS"
+  if [ "${#MLKEM_HW_VEXII_ARGS[@]}" -ne 0 ]; then
+    VEXII_EFFECTIVE_ARGS="${VEXII_EFFECTIVE_ARGS:+$VEXII_EFFECTIVE_ARGS }${MLKEM_HW_VEXII_ARGS[*]}"
   fi
   BUILD_DIR="${MLKEM_BUILD_DIR:-$LITEX_DIR/build/mlkem_hw_${MLKEM_HW_VALUE}_sw_${MLKEM_SW_VALUE}}"
   [[ "$BUILD_DIR" = /* ]] || BUILD_DIR="$REPO_ROOT/$BUILD_DIR"
@@ -163,6 +177,7 @@ preflight() {
     || die "submódulo mlkem-native ausente; rode: git submodule update --init external/mlkem-native"
   [ -f "$MLKEM_PATCH" ] || die "patch ML-KEM ausente: $MLKEM_PATCH"
   [ -f "$PKG_DIR/bios/mlkem_accel_select.h" ] || die "header de seleção ausente"
+  [ -f "$MLKEM_DIR/src/mlkem_keccak_vexii.h" ] || die "backend Keccak ausente"
 
   command -v meson >/dev/null 2>&1 || die "Meson ausente no ambiente ativo"
   command -v ninja >/dev/null 2>&1 || die "Ninja ausente no ambiente ativo"
@@ -237,6 +252,7 @@ say "Copiando arquivos ML-KEM para o BIOS: $BIOS_DIR"
 cp "$PKG_DIR/bios/mlkem_litex.c"               "$BIOS_DIR/"
 cp "$PKG_DIR/bios/mlkem_native_litex_config.h" "$BIOS_DIR/"
 cp "$PKG_DIR/bios/kat_vectors.h"               "$BIOS_DIR/"
+cp "$MLKEM_DIR/src/mlkem_keccak_vexii.h"       "$BIOS_DIR/"
 
 write_accel_header() {
   local destination="$BIOS_DIR/mlkem_accel_select.h" temporary
@@ -245,22 +261,21 @@ write_accel_header() {
     printf '%s\n' '#ifndef MLKEM_ACCEL_SELECT_H' '#define MLKEM_ACCEL_SELECT_H' ''
     printf '#define MLKEM_HW_ACCEL_NAME "%s"\n' "$MLKEM_HW_VALUE"
     printf '#define MLKEM_SW_ACCEL_NAME "%s"\n' "$MLKEM_SW_VALUE"
-    case "$MLKEM_HW_VALUE" in
-      montmul) printf '%s\n' '#define MLK_HW_HAS_MONTMUL' ;;
-      montred) printf '%s\n' '#define MLK_HW_HAS_MONTRED' ;;
-      both) printf '%s\n' '#define MLK_HW_HAS_MONTMUL' '#define MLK_HW_HAS_MONTRED' ;;
-    esac
-    case "$MLKEM_SW_VALUE" in
-      montmul) printf '%s\n' '#define MLK_USE_MONTMUL' ;;
-      montred) printf '%s\n' '#define MLK_USE_MONTRED' ;;
-      both) printf '%s\n' '#define MLK_USE_MONTMUL' '#define MLK_USE_MONTRED' ;;
-    esac
+    config_has_feature "$MLKEM_HW_VALUE" montmul && printf '%s\n' '#define MLK_HW_HAS_MONTMUL'
+    config_has_feature "$MLKEM_HW_VALUE" montred && printf '%s\n' '#define MLK_HW_HAS_MONTRED'
+    config_has_feature "$MLKEM_HW_VALUE" keccak && printf '%s\n' '#define MLK_HW_HAS_KECCAK'
+    config_has_feature "$MLKEM_SW_VALUE" montmul && printf '%s\n' '#define MLK_USE_MONTMUL'
+    config_has_feature "$MLKEM_SW_VALUE" montred && printf '%s\n' '#define MLK_USE_MONTRED'
+    config_has_feature "$MLKEM_SW_VALUE" keccak && printf '%s\n' '#define MLK_USE_KECCAK'
     printf '%s\n' '' \
       '#if defined(MLK_USE_MONTMUL) && !defined(MLK_HW_HAS_MONTMUL)' \
       '#error "MLK_USE_MONTMUL requires a VexiiRiscv core with MontMulPlugin"' \
       '#endif' '' \
       '#if defined(MLK_USE_MONTRED) && !defined(MLK_HW_HAS_MONTRED)' \
       '#error "MLK_USE_MONTRED requires a VexiiRiscv core with MontRedPlugin"' \
+      '#endif' '' \
+      '#if defined(MLK_USE_KECCAK) && !defined(MLK_HW_HAS_KECCAK)' \
+      '#error "MLK_USE_KECCAK requires a VexiiRiscv core with KeccakPlugin"' \
       '#endif' '' '#endif'
   } > "$temporary"
   if [ -f "$destination" ] && cmp -s "$temporary" "$destination"; then
@@ -322,7 +337,7 @@ write_manifest() {
   fi
   reports="$(find "$BUILD_DIR" -type f \( -name '*.rpt' -o -name '*.html' -o -name '*timing*' \) -print 2>/dev/null | sort || true)"
   {
-    printf '# Manifesto do build ML-KEM Montgomery\n\n'
+    printf '# Manifesto do build dos aceleradores ML-KEM\n\n'
     printf -- '- Data: `%s`\n' "$(date --iso-8601=seconds)"
     printf -- '- Status: `%s`\n' "$status"
     printf -- '- Repositório/gerador: `%s`\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -334,6 +349,8 @@ write_manifest() {
     printf -- '- CPU variant: `%s`\n' "$CPU_VARIANT"
     printf -- '- Vexii args: `%s`\n' "${VEXII_EFFECTIVE_ARGS:-<vazio>}"
     printf -- '- Clock alvo: `48000000 Hz`\n'
+    printf -- '- Keccak opcode: `custom-2/0x5b`, `funct7=0`, `funct3=0..3`\n'
+    printf -- '- Keccak latência nominal: `24 ciclos por permutação`\n'
     printf -- '- Python: `%s`\n' "$(python3 -c 'import platform; print(platform.python_version())')"
     printf -- '- Meson: `%s`\n' "$(meson --version)"
     printf -- '- Ninja: `%s`\n' "$(ninja --version)"

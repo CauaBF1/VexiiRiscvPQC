@@ -30,8 +30,8 @@ O `makefile` do firmware usa por padrão:
 ```make
 RISCV_NAME ?= riscv64-unknown-elf
 RISCV_PATH ?= /home/borgescaua/opt/riscv-elf-multilib
-MABI  := lp64
-MARCH := rv64imac_zicsr
+MABI  ?= lp64
+MARCH ?= rv64imac_zicsr
 ```
 Ajuste `RISCV_PATH`/`RISCV_NAME` se sua toolchain estiver em outro lugar.
 
@@ -85,7 +85,7 @@ make -C src/main/c/vexii/mlkem512 unprep    # reverte o patch, se precisar
 > - Com o patch e sem `-DMLK_PROFILE`, os hooks viram statements no-op: não mudam
 >   o código executável/comportamento. O ELF completo pode diferir por metadados `-g`.
 
-### 4. (opcional) Ligar a aceleração no build
+### 4. (opcional) Ligar as acelerações no build
 
 Com o patch aplicado, compile passando o define pra rotear `mlk_fqmul` pela
 instrução `montmul` (ver `understanding/benchmarks/montmul/`):
@@ -107,6 +107,36 @@ sbt "runMain vexiiriscv.execute.VexiiMontSim \
 
 O `TestBench` padrão não instancia essas instruções; use `VexiiMontmulSim` para
 `montmul` isolado e `VexiiMontSim` para qualquer combinação com `montred`.
+
+Para ligar somente a permutação Keccak-f[1600]:
+
+```bash
+make -B -C src/main/c/vexii/mlkem512 KAT=yes \
+  CFLAGS_EXTRA=-DMLK_USE_KECCAK all
+sbt "runMain vexiiriscv.tester.TestBench \
+  --load-elf src/main/c/vexii/mlkem512/build/mlkem512.elf \
+  --xlen 64 --with-rvm --with-rvc --with-keccak \
+  --performance-counters 0 --reset-vector 2147483648 \
+  --no-rvls-check --no-stdin"
+```
+
+Para ligar Montgomery e Keccak juntos, use os três defines no firmware e as
+três opções no core:
+
+```bash
+make -B -C src/main/c/vexii/mlkem512 KAT=yes \
+  CFLAGS_EXTRA='-DMLK_USE_MONTMUL -DMLK_USE_MONTRED -DMLK_USE_KECCAK' all
+sbt "runMain vexiiriscv.tester.TestBench \
+  --load-elf src/main/c/vexii/mlkem512/build/mlkem512.elf \
+  --xlen 64 --with-rvm --with-rvc \
+  --with-montmul --with-montred --with-keccak \
+  --performance-counters 0 --reset-vector 2147483648 \
+  --no-rvls-check --no-stdin"
+```
+
+O backend Keccak usa o hook FIPS-202 x1 oficial do `mlkem-native`; ele não faz
+parte de `external/mlkem-native.patch`. `MLK_USE_KECCAK` é incompatível com
+`MLK_CONFIG_NO_ASM`, por isso os headers de configuração escolhem um ou outro.
 
 ---
 
@@ -266,7 +296,7 @@ make -C src/main/c/vexii/mlkem512 clean        # limpar build do firmware
 
 ---
 
-## Executar Montgomery na placa pelo vlab com `deploy.sh` ✅ VALIDADO
+## Executar Montgomery e Keccak na placa pelo vlab com `deploy.sh`
 
 Este é o fluxo completo executado em 2026-08-26 e 2026-08-27 na Tang Primer
 20K. O baseline e os bitstreams com `montmul`, `montred` e ambos foram gerados,
@@ -441,12 +471,12 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 Não abra o canal A/JTAG como terminal serial enquanto o `openFPGALoader` estiver
 programando a placa.
 
-### 4. Build e load Montgomery pelo `deploy.sh` no terminal B
+### 4. Build e load dos aceleradores pelo `deploy.sh` no terminal B
 
 Com o ambiente da etapa 1 ativo e a UART aguardando, o seletor aceita `none`,
-`montmul`, `montred` ou `both` e, no modo simples, ativa a mesma combinação no
-RTL e no firmware. Rode primeiro o baseline e depois as três configurações
-Montgomery, mantendo a UART aberta:
+`montmul`, `montred`, `both`, `keccak`, `montmul-keccak`, `montred-keccak` ou
+`all`. `both` continua significando `montmul+montred`; `all` ativa as três
+features. No modo simples, a mesma combinação entra no RTL e no firmware.
 
 ```bash
 cd ~/VexiiRiscvPQC
@@ -454,6 +484,8 @@ MLKEM_ACCEL=none    LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montmul LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=montred LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_ACCEL=both    LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=keccak  LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
+MLKEM_ACCEL=all     LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 ```
 
 Cada comando gera hardware, firmware e diretório próprios:
@@ -464,12 +496,14 @@ Cada comando gera hardware, firmware e diretório próprios:
 | `montmul` | `MontMulPlugin` | `montmul` | `~/litex/build/mlkem_hw_montmul_sw_montmul/` |
 | `montred` | `MontRedPlugin` | `montred` | `~/litex/build/mlkem_hw_montred_sw_montred/` |
 | `both` | ambos | ambas | `~/litex/build/mlkem_hw_both_sw_both/` |
+| `keccak` | `KeccakPlugin` | KWRITE/KREAD/KPERM/KCLEAR | `~/litex/build/mlkem_hw_keccak_sw_keccak/` |
+| `all` | três plugins | Montgomery + Keccak | `~/litex/build/mlkem_hw_all_sw_all/` |
 
 O `deploy.sh` passa as opções de hardware ao `SocGen`, gera no BIOS o header com
 as opções de software, força `--no-netlist-cache` e grava no manifesto os commits,
 flags e hash do bitstream. `VEXII_ARGS` deve ficar vazio durante esta campanha.
 
-Depois da campanha casada, mantenha exatamente o mesmo core com os dois plugins
+Depois da campanha casada, mantenha exatamente o mesmo core com todos os plugins
 e varie somente as instruções usadas pelo firmware. Esta é a matriz recomendada
 para isolar o efeito do código emitido:
 
@@ -478,10 +512,15 @@ MLKEM_HW=both MLKEM_SW=none     LITEX_DIR=~/litex bash litex/tang_primer_20k/dep
 MLKEM_HW=both MLKEM_SW=montmul  LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_HW=both MLKEM_SW=montred  LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 MLKEM_HW=both MLKEM_SW=both     LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=all  MLKEM_SW=both     LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=all  MLKEM_SW=keccak   LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
+MLKEM_HW=all  MLKEM_SW=all      LITEX_DIR=~/litex bash litex/tang_primer_20k/deploy.sh --all
 ```
 
 O script rejeita qualquer `MLKEM_SW` que não seja subconjunto de `MLKEM_HW`.
-Não coloque `--with-montmul`/`--with-montred` em `VEXII_ARGS`.
+Não coloque `--with-montmul`, `--with-montred` ou `--with-keccak` em
+`VEXII_ARGS`; o deploy deriva essas opções de `MLKEM_HW` e gera o header do
+firmware correspondente.
 
 O sucesso do deploy exige, no log:
 
@@ -511,8 +550,8 @@ Novas instrumentações devem conferir se o BIOS continua cabendo em `0x8000`.
 Para cada configuração, confirme primeiro que a UART identifica o par correto:
 
 ```text
-[MLKEM] hw_accel=<none|montmul|montred|both>
-[MLKEM] sw_accel=<none|montmul|montred|both>
+[MLKEM] hw_accel=<none|montmul|montred|both|keccak|montmul-keccak|montred-keccak|all>
+[MLKEM] sw_accel=<none|montmul|montred|both|keccak|montmul-keccak|montred-keccak|all>
 ```
 
 O veredito só é positivo quando todas estas linhas aparecem:
@@ -554,6 +593,22 @@ cinco vezes, use a mediana e registre mínimo, máximo e variação percentual. 
 também a matriz com `MLKEM_HW=both` para separar o efeito do firmware de diferenças
 entre configurações do core.
 
+Resultados locais do core saudável VexiiRiscv, cinco execuções por configuração
+e mediana da soma `keypair + encaps + decaps`:
+
+| configuração | keypair | encaps | decaps | soma | speedup contra `none` |
+|---|---:|---:|---:|---:|---:|
+| `none` | 334.952 | 455.480 | 601.315 | 1.391.687 | 1,000x |
+| `both` | 282.898 | 375.950 | 479.982 | 1.138.830 | 1,222x |
+| `keccak` | 250.556 | 368.978 | 492.390 | 1.111.882 | 1,252x |
+| `all` | 198.104 | 294.174 | 379.117 | 871.246 | 1,597x |
+
+O backend Keccak completo teve mediana de aproximadamente 396 ciclos por
+permutação, incluindo 50 escritas, `KPERM`, 50 leituras e `KCLEAR`; a região C
+equivalente teve aproximadamente 3.448 ciclos, ou `8,71x` de ganho local. Esses
+resultados são de simulação e servem para demonstrar corretude e ganho em ciclos.
+Eles não substituem os relatórios de área/timing nem as medições físicas da FPGA.
+
 `BIOS CRC passed`, `Memtest OK` e o posterior `No boot medium found` são
 compatíveis com a execução: o KAT já terminou e o BIOS apenas não encontrou uma
 segunda imagem para carregar. A string padrão da ISA não mostra `montmul` ou
@@ -571,7 +626,8 @@ openFPGALoader --cable ft2232 \
 ```
 
 Exemplos válidos são `mlkem_hw_none_sw_none`, `mlkem_hw_montmul_sw_montmul`,
-`mlkem_hw_montred_sw_montred` e `mlkem_hw_both_sw_both`. Recarregar o `.fs` não
+`mlkem_hw_montred_sw_montred`, `mlkem_hw_both_sw_both`,
+`mlkem_hw_keccak_sw_keccak` e `mlkem_hw_all_sw_all`. Recarregar o `.fs` não
 ressintetiza o SoC e é o método indicado para medir a variação entre boots do
 mesmo bitstream.
 
@@ -716,13 +772,13 @@ python3 -m litex_boards.targets.sipeed_tang_primer_20k \
   --cpu-type=vexiiriscv \
   --cpu-variant=standard \
   --update-repo=no --no-netlist-cache \
-  --vexii-args="--with-montmul --with-montred" \
+  --vexii-args="--with-montmul --with-montred --with-keccak" \
   --uart-name=serial \
   --bios-console=disable --bios-lto \
   --integrated-rom-size=0x8000 \
   --integrated-sram-size=0x8000 \
   --integrated-main-ram-size=0x100 \
-  --output-dir=~/litex/build/mlkem_hw_both_sw_both \
+  --output-dir=~/litex/build/mlkem_hw_all_sw_all \
   --build \
   --load
 ```
@@ -731,8 +787,8 @@ Notas:
   ativaria o caminho com DRAM).
 - `--integrated-sram-size=0x8000` deixa folga para o ML-KEM-512 e a stack.
 - `--integrated-rom-size` deve caber o BIOS + o código do ML-KEM.
-- O usuário deve deixar `VEXII_ARGS` vazio na campanha Montgomery; o deploy gera
-  internamente `--vexii-args="--with-montmul"`, `--with-montred` ou ambos a
+- O usuário deve deixar `VEXII_ARGS` vazio na campanha de aceleradores; o deploy
+  gera internamente `--with-montmul`, `--with-montred` e `--with-keccak` a
   partir de `MLKEM_HW`. Não passe essas opções manualmente, pois o header do
   firmware também precisa corresponder ao hardware. Para experimentar
   bit-manipulation (ver `understanding/plano_aceleracao.md`),
@@ -778,8 +834,9 @@ tempo_ms = cycles * 1000 / clock_hz
 > Status: o baseline e as configurações físicas `montmul`, `montred` e `both`
 > produziram `KAT PASS` na Tang Primer 20K a 48 MHz em 2026-08-27. A configuração
 > `both` reduziu a soma dos três trechos medidos em 7,857%. A coleta consolidada
-> de área, slack e Fmax nos relatórios do Gowin e a matriz controlada com
-> `MLKEM_HW=both` continuam pendentes.
+> de área, slack e Fmax nos relatórios do Gowin continua pendente. Localmente,
+> `keccak` e `all` passaram no KAT integrado e `all` atingiu `1,597x` em ciclos;
+> a síntese e a campanha física dessas duas configurações ainda estão pendentes.
 
 ---
 

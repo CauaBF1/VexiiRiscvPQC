@@ -15,4 +15,8 @@
 #error "MLK_USE_MONTRED requires a VexiiRiscv core with MontRedPlugin"
 #endif
 
+#if defined(MLK_USE_KECCAK) && !defined(MLK_HW_HAS_KECCAK)
+#error "MLK_USE_KECCAK requires a VexiiRiscv core with KeccakPlugin"
+#endif
+
 #endif
