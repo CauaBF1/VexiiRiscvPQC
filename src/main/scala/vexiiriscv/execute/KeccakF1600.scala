@@ -108,9 +108,10 @@ case class KeccakF1600Core() extends Component {
   val roundIndex = Reg(UInt(5 bits)) init 0
 
   val constants = Vec(RoundConstants.map(value => B(value, 64 bits)))
-  val selectedConstant = constants(roundIndex)
+  // roundIndex remains at 23 on completion. Select RC[0] whenever idle so
+  // consecutive starts without clear always begin a fresh permutation.
+  val selectedConstant = busy ? constants(roundIndex) | B(RoundConstants.head, 64 bits)
   val nextState = KeccakF1600.round(state, selectedConstant)
-  val firstState = KeccakF1600.round(state, B(RoundConstants.head, 64 bits))
 
   io.busy := busy
   io.done := busy && roundIndex === RoundCount - 1
@@ -130,13 +131,12 @@ case class KeccakF1600Core() extends Component {
     } otherwise {
       state(io.writeIndex(5 downto 1))(31 downto 0) := io.writeData
     }
-  } elsewhen(io.start && !busy) {
-    for (index <- 0 until LaneCount) state(index) := firstState(index)
-    roundIndex := 1
-    busy := True
-  } elsewhen(busy) {
+  } elsewhen(io.start || busy) {
     for (index <- 0 until LaneCount) state(index) := nextState(index)
-    when(roundIndex === RoundCount - 1) {
+    when(!busy) {
+      roundIndex := 1
+      busy := True
+    } elsewhen(roundIndex === RoundCount - 1) {
       busy := False
     } otherwise {
       roundIndex := roundIndex + 1
