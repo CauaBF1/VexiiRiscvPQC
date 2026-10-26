@@ -2,6 +2,7 @@
 
 #include "mlkem_native.h"
 #include "sim.h"
+#include "vexii_cycle.h"
 
 #ifndef BENCH_ROUNDS
 #define BENCH_ROUNDS 2u
@@ -45,9 +46,7 @@ static void print_bytes_prefix(const char *label, const uint8_t *buf, uint32_t n
 }
 
 static inline uint64_t read_cycle(void) {
-  uint64_t value;
-  asm volatile("rdcycle %0" : "=r"(value)); /* rv64: full 64-bit counter */
-  return value;
+  return vexii_read_cycle();
 }
 
 static int shared_secret_matches(void) {

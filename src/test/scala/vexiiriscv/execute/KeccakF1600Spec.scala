@@ -56,6 +56,13 @@ object KeccakIsolatedGenerate extends App {
   SpinalConfig(targetDirectory = args(0)).generateVerilog(KeccakIsolatedHarness())
 }
 
+/** Generate the bare core for comparable local synthesis, without harness FFs. */
+object KeccakCoreGenerate extends App {
+  require(args.length == 2 && Set("full", "compact").contains(args(1)),
+    "usage: KeccakCoreGenerate <output-directory> <full|compact>")
+  SpinalConfig(targetDirectory = args(0)).generateVerilog(KeccakF1600Core(compact = args(1) == "compact"))
+}
+
 class KeccakF1600Spec extends AnyFunSuite {
   private val mask = (BigInt(1) << 64) - 1
 
@@ -125,9 +132,14 @@ class KeccakF1600Spec extends AnyFunSuite {
     }
   }
 
-  test("iterative core implements protocol, exact latency, clear, and 1000 full permutations") {
-    SimConfig.withVerilator.compile(KeccakF1600Core()).doSim { dut =>
-      SimTimeout(2000000)
+  for (compact <- Seq(false, true)) test(s"${if (compact) "compact" else "full"} core implements protocol, exact latency, intermediate states, and 1000 permutations") {
+    val latency = KeccakF1600.permutationCycles(compact)
+    SimConfig.withVerilator.compile {
+      val core = KeccakF1600Core(compact)
+      core.state.foreach(_.simPublic())
+      core
+    }.doSim { dut =>
+      SimTimeout(8000000)
       dut.clockDomain.forkStimulus(10)
       dut.io.writeValid #= false
       dut.io.writeIndex #= 0
@@ -157,26 +169,44 @@ class KeccakF1600Spec extends AnyFunSuite {
       def readState(): Seq[BigInt] = (0 until 25).map { lane =>
         readWord(2 * lane) | (readWord(2 * lane + 1) << 32)
       }
-      def startAndWait(commandsWhileBusy: Boolean = false): Unit = {
+      def startAndWait(commandsWhileBusy: Boolean = false, checkIntermediate: Boolean = false): Unit = {
+        var expected = if (checkIntermediate) readState() else Seq.empty[BigInt]
+        var roundSteps: RefSteps = null
+        def checkEdge(edge: Int): Unit = if (checkIntermediate) {
+          if (!compact) expected = referenceSteps(expected, KeccakF1600.RoundConstants(edge)).iota
+          else if (edge % 6 == 0) {
+            roundSteps = referenceSteps(expected, KeccakF1600.RoundConstants(edge / 6))
+            expected = roundSteps.rhoPi
+          } else {
+            val row = edge % 6 - 1
+            expected = expected.indices.map(i => if (i / 5 == row) roundSteps.iota(i) else expected(i))
+          }
+          // Observe all registers at once. Walking KREAD would advance clocks
+          // while busy and mix states from several phases in one observation.
+          assert(dut.state.map(_.toBigInt).toSeq == expected, s"intermediate edge=$edge compact=$compact")
+        }
         dut.io.start #= true
         dut.clockDomain.waitSampling()
         sleep(1)
         dut.io.start #= false
+        checkEdge(0)
         assert(dut.io.busy.toBoolean)
-        for (cycle <- 1 until 23) {
+        for (cycle <- 1 until latency - 1) {
           // Busy ignores even simultaneous clear/write/start requests.
           dut.io.clear #= commandsWhileBusy
           dut.io.writeValid #= commandsWhileBusy
-          dut.io.writeIndex #= cycle
+          dut.io.writeIndex #= cycle % 64
           dut.io.writeData #= 0xdeadbeefL
           dut.io.start #= commandsWhileBusy
           assert(!dut.io.done.toBoolean, s"done early at cycle $cycle")
           dut.clockDomain.waitSampling()
           sleep(1)
+          checkEdge(cycle)
         }
-        assert(dut.io.done.toBoolean, "done must mark the 24th execution cycle")
+        assert(dut.io.done.toBoolean, s"done must mark execution cycle $latency")
         dut.clockDomain.waitSampling()
         sleep(1)
+        checkEdge(latency - 1)
         dut.io.clear #= false
         dut.io.writeValid #= false
         dut.io.start #= false
@@ -201,7 +231,12 @@ class KeccakF1600Spec extends AnyFunSuite {
       val words = Array.fill[BigInt](50)(0)
       for (index <- 0 until 50) {
         words(index) = (BigInt("9e3779b9", 16) * (index + 1)) & BigInt("ffffffff", 16)
+        // E2a uses local word enables: a valid write must still suppress the
+        // permutation globally, including all unselected half-lanes.
+        dut.io.start #= true
         writeWord(index, words(index))
+        dut.io.start #= false
+        assert(!dut.io.busy.toBoolean, s"write must block start at word $index")
         for (other <- 0 until 50) assert(readWord(other) == words(other), s"write=$index read=$other")
       }
       for (index <- 50 until 64) {
@@ -219,8 +254,12 @@ class KeccakF1600Spec extends AnyFunSuite {
       dut.clockDomain.waitSampling()
       sleep(1)
       dut.io.clear #= false
+      dut.io.writeValid #= false
+      dut.io.start #= false
       assert(!dut.io.busy.toBoolean)
       assert(readState().forall(_ == 0))
+      dut.io.writeValid #= true
+      dut.io.start #= true
       dut.clockDomain.waitSampling()
       sleep(1)
       dut.io.writeValid #= false
@@ -231,7 +270,7 @@ class KeccakF1600Spec extends AnyFunSuite {
       load((0 until 25).map(BigInt(_)))
       dut.io.writeValid #= true
       dut.io.writeIndex #= 63
-      startAndWait(commandsWhileBusy = true)
+      startAndWait(commandsWhileBusy = true, checkIntermediate = true)
       assert(readState() == rampKnownAnswer, "busy commands must not alter the permutation")
 
       // Reset aborts an in-flight operation and deterministically clears state.
@@ -261,7 +300,7 @@ class KeccakF1600Spec extends AnyFunSuite {
       val states = fixed ++ Seq.fill(996)(Seq.fill(25)(BigInt(64, random)))
       for ((state, sample) <- states.zipWithIndex) {
         load(state)
-        startAndWait()
+        startAndWait(checkIntermediate = sample < 4)
         val expected = if (sample == 0) zeroKnownAnswer else if (sample == 1) rampKnownAnswer else permute(state)
         assert(readState() == expected, s"full permutation sample=$sample")
       }
@@ -275,6 +314,8 @@ class KeccakF1600Spec extends AnyFunSuite {
       sleep(1)
       dut.io.clear #= false
       assert(readState().forall(_ == 0))
+      startAndWait()
+      assert(readState() == zeroKnownAnswer, "start after clear must use RC[0]")
     }
   }
 }

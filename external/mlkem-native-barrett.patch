@@ -1,0 +1,23 @@
+--- a/mlkem/src/poly.c
++++ b/mlkem/src/poly.c
+@@ -87,6 +87,12 @@
+   ensures(return_value > -MLKEM_Q_HALF && return_value < MLKEM_Q_HALF)
+ )
+ {
++#ifdef MLK_USE_BARRETT
++  /* Stateless custom-0/funct7=3: signed low 16 bits -> centered mod 3329. */
++  int32_t hw;
++  __asm__(".insn r 0x0B, 0, 3, %0, %1, x0" : "=r"(hw) : "r"((int32_t)a));
++  int16_t res = (int16_t)hw;
++#else
+   /* Barrett reduction approximates
+    * ```
+    *     round(a/MLKEM_Q)
+@@ -110,6 +116,7 @@
+    * evaluate t * MLKEM_Q and the subsequent subtraction
+    */
+   int16_t res = (int16_t)(a - t * MLKEM_Q);
++#endif /* MLK_USE_BARRETT */
+ 
+   mlk_assert_abs_bound(&res, 1, MLKEM_Q_HALF);
+   return res;

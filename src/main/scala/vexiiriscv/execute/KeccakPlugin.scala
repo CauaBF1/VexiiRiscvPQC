@@ -24,7 +24,7 @@ object KeccakPlugin {
   val OpClear = U(3, 2 bits)
 }
 
-class KeccakPlugin(val layer: LaneLayer) extends ExecutionUnitElementSimple(layer) {
+class KeccakPlugin(val layer: LaneLayer, val compact: Boolean = false) extends ExecutionUnitElementSimple(layer) {
   import KeccakPlugin._
 
   val logic = during setup new Logic {
@@ -49,7 +49,7 @@ class KeccakPlugin(val layer: LaneLayer) extends ExecutionUnitElementSimple(laye
     uopRetainer.release()
 
     val process = new el.Execute(id = 0) {
-      val core = KeccakF1600Core()
+      val core = KeccakF1600Core(compact)
       val selected = isValid && SEL
       val accepted = selected && isReady && !isCancel
       val commandSent = RegInit(False) setWhen(core.io.start) clearWhen(isReady)
@@ -61,8 +61,7 @@ class KeccakPlugin(val layer: LaneLayer) extends ExecutionUnitElementSimple(laye
       core.io.clear := accepted && OP === OpClear
       core.io.start := selected && !isCancel && OP === OpPermute && !commandSent && !core.io.busy
 
-      // done is asserted in the cycle which commits round 23. Releasing the
-      // instruction here gives exactly 24 occupied execute cycles.
+      // Release on the final state update in either architecture (24/144 cycles).
       el.freezeWhen(selected && OP === OpPermute && !core.io.done)
 
       wb.valid := SEL && OP === OpRead

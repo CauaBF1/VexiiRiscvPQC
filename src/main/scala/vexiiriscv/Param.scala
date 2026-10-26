@@ -172,9 +172,11 @@ class ParamSimple() {
   // ParamSimple configuration and every existing SoC remain unchanged.
   var withMontMul = false
   var withMontRed = false
+  var withBarrett = false
   // Stateful Keccak-f[1600] custom-2 accelerator. Kept opt-in so existing
   // configurations do not gain a 1,600-bit state bank or custom opcodes.
   var withKeccak = false
+  var keccakCompact = false
   var divRadix = 2
   var divImpl = ""
   var divArea = true
@@ -665,7 +667,8 @@ class ParamSimple() {
     if (withIterativeShift) r += "isft"
     if (withMontMul) r += "montmul"
     if (withMontRed) r += "montred"
-    if (withKeccak) r += "keccak"
+    if (withBarrett) r += "barrett"
+    if (withKeccak) r += (if (keccakCompact) "keccakcompact" else "keccak")
     if (withDiv) r += s"d${divRadix}${divImpl}${if(divArea)"Area" else ""}"
     if (privParam.withDebug) r += s"pdbg"
     if (embeddedJtagTap) r += s"jtagt"
@@ -723,7 +726,12 @@ class ParamSimple() {
     opt[Unit]("with-rvZknAes") action { (v, c) => addISA("zkne", "zknd") }
     opt[Unit]("with-montmul") action { (v, c) => withMontMul = true }
     opt[Unit]("with-montred") action { (v, c) => withMontRed = true }
+    opt[Unit]("with-barrett") action { (v, c) => withBarrett = true }
     opt[Unit]("with-keccak") action { (v, c) => withKeccak = true }
+    opt[String]("keccak-architecture") validate { v =>
+      if (Set("full", "compact").contains(v)) success
+      else failure("keccak-architecture must be full or compact")
+    } action { (v, c) => keccakCompact = v == "compact" }
     opt[Unit]("with-sxaia") action { (v, c) => addISA("smaia", "ssaia") }
     opt[Int]("imsic-interrupt-number") action { (v, c) => privParam.imsicInterrupts = v }
     opt[Unit]("with-whiteboxer-outputs") action { (v, c) => withWhiteboxerOutputs = true }
@@ -846,13 +854,18 @@ class ParamSimple() {
     }
     checkConfig(c => {
       fixIsaParams()
-      success
+      if (withBarrett && withCfu) failure("--with-barrett conflicts with --with-cfu (custom-0 opcode)")
+      else success
     })
   }
+
+  def checkCustomInstructionCompatibility(): Unit =
+    require(!(withBarrett && withCfu), "Barrett conflicts with CFU on custom-0 opcode")
 
   // Generate the VexiiRiscv plugin list out of the current SimpleParam configuration
   def plugins(hartId : Int = 0) = pluginsArea(hartId).plugins
   def pluginsArea(hartId : Int = 0) = new Area {
+    checkCustomInstructionCompatibility()
     val plugins = ArrayBuffer[Hostable]()
     if(withLateAlu) assert(allowBypassFrom == 0)
     if(withMmu && lsuL1Enable) assert(lsuL1Sets <= 64, "MMU require not more than 64 sets in the LSU L1")
@@ -1030,7 +1043,8 @@ class ParamSimple() {
     plugins += shifter(early0, formatAt = relaxedShift.toInt)
     if(withMontMul) plugins += new MontMulPlugin(early0)
     if(withMontRed) plugins += new MontRedPlugin(early0)
-    if(withKeccak) plugins += new KeccakPlugin(early0)
+    if(withBarrett) plugins += new BarrettPlugin(early0)
+    if(withKeccak) plugins += new KeccakPlugin(early0, compact = keccakCompact)
     plugins += new IntFormatPlugin(lane0)
     plugins += new BranchPlugin(layer=early0, aluAt=0, jumpAt=relaxedBranch.toInt, wbAt=0)
     if(withRvZknAes) plugins += new AesZknPlugin(layer = early0)

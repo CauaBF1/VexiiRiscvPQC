@@ -112,11 +112,23 @@ estado interno. Use os seletores `MLKEM_*` do deploy: passar essas flags
 diretamente em `VEXII_ARGS` é rejeitado para impedir hardware e firmware
 divergentes.
 
+A arquitetura `full` conserva a E2a, com 24 ciclos por permutação. A candidata
+`compact` compartilha χ entre cinco linhas, usa o mesmo banco de 1.600 bits e
+leva 144 ciclos. No deploy, selecione `MLKEM_KECCAK_ARCH=compact`; em SocGen ou
+TestBench, use `--with-keccak --keccak-architecture=compact`. O padrão continua
+`full` para permitir comparação explícita. Nomes do gerador, argumentos,
+manifesto e diretório padrão do deploy distinguem as duas arquiteturas.
+
+A receita limitada a **uma tentativa de 20 minutos**, resultados locais e
+limitações físicas estão em
+`understanding/benchmarks/keccak/simplificacao_20260930/`. Essa receita usa
+`--build` com timeout e exige auditoria dos relatórios antes de carregar a placa.
+
 > ⚠️ **Não passe `--with-mul --with-div`.** O commit pinado do VexII (mudança
 > "isamap") **rejeita** essas flags (`Unknown option`); o M já entra pela ISA do
 > variant (`isa_map`, o `core.py` do LiteX adiciona `m`). O forwarding
 > `--allow-bypass-from=0` **já é default** do `core.py` do LiteX (o Patch 1 do vlab
-> o mantém). Detalhes na §3 de `understanding/done_execucao_vexii_vlab.md`.
+> o mantém). Detalhes na §3 de `understanding/registros/done_execucao_vexii_vlab.md`.
 
 ### Sweet-spot de microarquitetura (recomendado) — só flags, sem tocar no firmware
 
@@ -154,7 +166,7 @@ reduzir caches para caber na BSRAM). Só tentar depois que o sweet-spot fechar:
 Ortogonal (corta contagem de instruções, ~1.24×). Como **muda a ISA**, além do
 `--vexii-args="--with-rvZbb --with-rvZba"` é preciso que o `-march` do BIOS do LiteX
 inclua `_zbb` (core e firmware sempre com a mesma ISA). Combinável com o sweet-spot
-(junte as flags). Ver `understanding/plano_aceleracao.md`.
+(junte as flags). Ver `understanding/planos/plano_aceleracao.md`.
 
 ---
 
@@ -240,3 +252,9 @@ git -C ~/litex/litex apply --reverse \
 - Área, Fmax, ciclos e KAT dos bitstreams Keccak ainda precisam ser preenchidos
   após a campanha no vlab; o clock impresso na UART não substitui o relatório de
   timing do Gowin.
+
+## Barrett complementando Montgomery
+
+A extensão Barrett é opt-in: `--with-barrett`, ou perfil `montgomery-barrett` no deploy. Os perfis existentes `both` (MontMul + MontRed) e `all` (inclui Keccak) mantêm seus significados. `barrett` e `all-barrett` também estão disponíveis.
+
+A documentação, os testes e os comandos reproduzíveis estão em [Barrett: objetivos e implementação](../../understanding/benchmarks/barrett_20261026/README.md) e [preparo e execução na Sipeed](../../understanding/benchmarks/barrett_20261026/COMANDOS_SIPEED.md). O modo `--prepare` gera SoC e BIOS com `--no-compile-gateware`, sem executar Gowin ou carregar a placa.

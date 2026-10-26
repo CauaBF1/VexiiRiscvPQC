@@ -22,6 +22,7 @@ MLKEM_NATIVE_DIR := $(ROOT)/external/mlkem-native/mlkem
 MLKEM_NATIVE_ROOT := $(ROOT)/external/mlkem-native
 # absolute: `git -C DIR apply FILE` resolves FILE relative to DIR, not to cwd.
 MLKEM_PATCH       := $(abspath $(ROOT)/external/mlkem-native.patch)
+MLKEM_BARRETT_PATCH := $(abspath $(ROOT)/external/mlkem-native-barrett.patch)
 
 APP_C_SRCS   := $(wildcard src/*.c)
 APP_ASM_SRCS := $(wildcard src/*.S)
@@ -41,7 +42,7 @@ LDSCRIPT = ./src/linker.ld
 
 # rv64 bare-metal toolchain (override RISCV_PATH/RISCV_NAME if installed elsewhere)
 RISCV_NAME ?= riscv64-unknown-elf
-RISCV_PATH ?= /home/borgescaua/opt/riscv-elf-multilib
+RISCV_PATH ?= /home/cauaborges/opt/riscv-elf-multilib
 
 MABI  ?= lp64
 # rv64: 'm' for Kyber mul, 'c' matches newlib multilib, zicsr for rdcycle.
@@ -107,12 +108,26 @@ prep:
 	else \
 	  echo "ERROR: $(MLKEM_PATCH) does not apply cleanly (submodule at wrong commit?)"; exit 1; \
 	fi
+	@if git -C $(MLKEM_NATIVE_ROOT) apply --reverse --check $(MLKEM_BARRETT_PATCH) 2>/dev/null; then \
+	  echo "mlkem-native Barrett patch already applied"; \
+	elif git -C $(MLKEM_NATIVE_ROOT) apply --check $(MLKEM_BARRETT_PATCH) 2>/dev/null; then \
+	  git -C $(MLKEM_NATIVE_ROOT) apply $(MLKEM_BARRETT_PATCH) && echo "mlkem-native Barrett patch applied"; \
+	else \
+	  echo "ERROR: $(MLKEM_BARRETT_PATCH) does not apply cleanly"; exit 1; \
+	fi
 
 .PHONY: unprep
 unprep:
-	@git -C $(MLKEM_NATIVE_ROOT) apply --reverse --check $(MLKEM_PATCH) 2>/dev/null \
-	  && git -C $(MLKEM_NATIVE_ROOT) apply --reverse $(MLKEM_PATCH) && echo "mlkem-native patch reverted" \
-	  || echo "mlkem-native patch not applied (nothing to revert)"
+	@for patch in $(MLKEM_BARRETT_PATCH) $(MLKEM_PATCH); do \
+	  if git -C $(MLKEM_NATIVE_ROOT) apply --reverse --check $$patch 2>/dev/null; then \
+	    git -C $(MLKEM_NATIVE_ROOT) apply --reverse $$patch || exit 1; \
+	    echo "reverted $$patch"; \
+	  elif git -C $(MLKEM_NATIVE_ROOT) apply --check $$patch 2>/dev/null; then \
+	    echo "not applied: $$patch"; \
+	  else \
+	    echo "ERROR: incompatible patch state: $$patch"; exit 1; \
+	  fi; \
+	done
 
 .PHONY: clean
 clean:

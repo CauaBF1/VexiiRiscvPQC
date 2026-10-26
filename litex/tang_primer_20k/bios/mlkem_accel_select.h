@@ -19,4 +19,8 @@
 #error "MLK_USE_KECCAK requires a VexiiRiscv core with KeccakPlugin"
 #endif
 
+#if defined(MLK_USE_BARRETT) && !defined(MLK_HW_HAS_BARRETT)
+#error "MLK_USE_BARRETT requires a VexiiRiscv core with BarrettPlugin"
+#endif
+
 #endif

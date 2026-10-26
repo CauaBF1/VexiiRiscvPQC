@@ -8,7 +8,7 @@ Guia de execução do ML-KEM-512 (Kyber) neste repositório **VexiiRiscv**. Cobr
 
 O algoritmo vem do submódulo `external/mlkem-native`. O firmware de simulação
 está em `src/main/c/vexii/mlkem512/`. Para o contexto do porte
-VexRiscv→VexiiRiscv, ver `understanding/implementacao_inicial_vexii.md`.
+VexRiscv→VexiiRiscv, ver `understanding/arquitetura/implementacao_inicial_vexii.md`.
 
 ---
 
@@ -137,6 +137,13 @@ sbt "runMain vexiiriscv.tester.TestBench \
 O backend Keccak usa o hook FIPS-202 x1 oficial do `mlkem-native`; ele não faz
 parte de `external/mlkem-native.patch`. `MLK_USE_KECCAK` é incompatível com
 `MLK_CONFIG_NO_ASM`, por isso os headers de configuração escolhem um ou outro.
+
+A candidata que compartilha χ por linha é selecionada no gerador por
+`--keccak-architecture=compact` e executa a permutação em 144 ciclos. O padrão
+`full` conserva 24 ciclos e a mesma interface de instruções. No deploy da Tang,
+use `MLKEM_KECCAK_ARCH=compact`. Evidências RV32 e a receita de uma tentativa
+física limitada a 20 minutos ficam em
+`understanding/benchmarks/keccak/simplificacao_20260930/`.
 
 ---
 
@@ -791,7 +798,7 @@ Notas:
   gera internamente `--with-montmul`, `--with-montred` e `--with-keccak` a
   partir de `MLKEM_HW`. Não passe essas opções manualmente, pois o header do
   firmware também precisa corresponder ao hardware. Para experimentar
-  bit-manipulation (ver `understanding/plano_aceleracao.md`),
+  bit-manipulation (ver `understanding/planos/plano_aceleracao.md`),
   acrescente `--with-rvZbb --with-rvZba` **e** garanta que o BIOS seja compilado
   com um `-march` que inclua `zbb` (core e firmware sempre com a **mesma** ISA).
 - A ISA gerada pelo core precisa casar com o `-march`/`-mabi` do BIOS. Confirme

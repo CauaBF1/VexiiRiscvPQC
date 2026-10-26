@@ -70,3 +70,11 @@ understanding/
 src/main/c/vexii/mlkem512/build/
 graphify-out/
 src/test/python/__pycache__/
+
+# Configuração e artefatos locais do Codex
+/.codex/
+/.agents/
+/AGENTS.md
+/GUIA_MODOS_CODEX.md
+/docs/codex-modos/
+/tools/codex_modes/

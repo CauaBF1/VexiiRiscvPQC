@@ -10,15 +10,17 @@
 #   MLKEM_HW=all MLKEM_SW=both LITEX_DIR=~/litex ./litex/tang_primer_20k/deploy.sh --all
 set -euo pipefail
 
-ACTION="${1:---all}" # --patch-litex | --check | --install | --build | --all
+ACTION="${1:---all}" # --patch-litex | --check | --install | --prepare | --build | --all
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PKG_DIR="$REPO_ROOT/litex/tang_primer_20k"
 LITEX_DIR="${LITEX_DIR:-$HOME/litex}"
 CPU_VARIANT="${CPU_VARIANT:-standard}"
 VEXII_ARGS="${VEXII_ARGS:-}"
+MLKEM_KECCAK_ARCH="${MLKEM_KECCAK_ARCH:-full}"
 UART_DEV="${UART_DEV:-/dev/ttyUSB2}"
 MLKEM_DIR="$REPO_ROOT/src/main/c/vexii/mlkem512"
 MLKEM_PATCH="$REPO_ROOT/external/mlkem-native.patch"
+MLKEM_BARRETT_PATCH="$REPO_ROOT/external/mlkem-native-barrett.patch"
 MLKEM_NATIVE_ROOT="$REPO_ROOT/external/mlkem-native"
 LITEX_GENERATOR_PATCH="$PKG_DIR/patches/vexiiriscv_local_generator.patch"
 LITEX_EXPECTED_REV_PREFIX="97d81467881f"
@@ -27,13 +29,13 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31mERRO: %s\033[0m\n' "$*" >&2; exit 1; }
 
 case "$ACTION" in
-  --patch-litex|--check|--install|--build|--all) ;;
-  *) die "ação desconhecida: $ACTION (use --patch-litex, --check, --install, --build ou --all)" ;;
+  --patch-litex|--check|--install|--prepare|--build|--all) ;;
+  *) die "ação desconhecida: $ACTION (use --patch-litex, --check, --install, --prepare, --build ou --all)" ;;
 esac
 
 valid_accel_config() {
   case "$1" in
-    none|montmul|montred|both|keccak|montmul-keccak|montred-keccak|all) return 0 ;;
+    none|montmul|montred|both|keccak|montmul-keccak|montred-keccak|all|barrett|montgomery-barrett|all-barrett) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -41,9 +43,10 @@ valid_accel_config() {
 config_has_feature() {
   local config="$1" feature="$2"
   case "$feature:$config" in
-    montmul:montmul|montmul:both|montmul:montmul-keccak|montmul:all) return 0 ;;
-    montred:montred|montred:both|montred:montred-keccak|montred:all) return 0 ;;
-    keccak:keccak|keccak:montmul-keccak|keccak:montred-keccak|keccak:all) return 0 ;;
+    montmul:montmul|montmul:both|montmul:montmul-keccak|montmul:all|montmul:montgomery-barrett|montmul:all-barrett) return 0 ;;
+    montred:montred|montred:both|montred:montred-keccak|montred:all|montred:montgomery-barrett|montred:all-barrett) return 0 ;;
+    keccak:keccak|keccak:montmul-keccak|keccak:montred-keccak|keccak:all|keccak:all-barrett) return 0 ;;
+    barrett:barrett|barrett:montgomery-barrett|barrett:all-barrett) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -72,13 +75,21 @@ resolve_accel_config() {
 
   valid_accel_config "$MLKEM_HW_VALUE" || die "MLKEM_HW inválido: $MLKEM_HW_VALUE"
   valid_accel_config "$MLKEM_SW_VALUE" || die "MLKEM_SW inválido: $MLKEM_SW_VALUE"
+  case "$MLKEM_KECCAK_ARCH" in
+    full) KECCAK_CYCLES=24 ;;
+    compact) KECCAK_CYCLES=144 ;;
+    *) die "MLKEM_KECCAK_ARCH inválido: use full ou compact" ;;
+  esac
 
-  if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--with-(montmul|montred|keccak)($|[=[:space:]]) ]]; then
-    die "não passe --with-montmul/--with-montred/--with-keccak em VEXII_ARGS; use MLKEM_ACCEL ou MLKEM_HW"
+  if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--with-(montmul|montred|keccak|barrett)($|[=[:space:]]) ]]; then
+    die "não passe flags de aceleradores em VEXII_ARGS; use MLKEM_ACCEL ou MLKEM_HW"
+  fi
+  if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--keccak-architecture($|[=[:space:]]) ]]; then
+    die "use MLKEM_KECCAK_ARCH para selecionar a arquitetura Keccak"
   fi
 
   local feature
-  for feature in montmul montred keccak; do
+  for feature in montmul montred keccak barrett; do
     if config_has_feature "$MLKEM_SW_VALUE" "$feature" && ! config_has_feature "$MLKEM_HW_VALUE" "$feature"; then
       die "firmware $MLKEM_SW_VALUE exige a feature $feature no hardware $MLKEM_HW_VALUE"
     fi
@@ -87,12 +98,18 @@ resolve_accel_config() {
   MLKEM_HW_VEXII_ARGS=()
   config_has_feature "$MLKEM_HW_VALUE" montmul && MLKEM_HW_VEXII_ARGS+=(--with-montmul)
   config_has_feature "$MLKEM_HW_VALUE" montred && MLKEM_HW_VEXII_ARGS+=(--with-montred)
-  config_has_feature "$MLKEM_HW_VALUE" keccak && MLKEM_HW_VEXII_ARGS+=(--with-keccak)
+  config_has_feature "$MLKEM_HW_VALUE" barrett && MLKEM_HW_VEXII_ARGS+=(--with-barrett)
+  if config_has_feature "$MLKEM_HW_VALUE" keccak; then
+    MLKEM_HW_VEXII_ARGS+=(--with-keccak --keccak-architecture="$MLKEM_KECCAK_ARCH")
+  fi
   VEXII_EFFECTIVE_ARGS="$VEXII_ARGS"
   if [ "${#MLKEM_HW_VEXII_ARGS[@]}" -ne 0 ]; then
     VEXII_EFFECTIVE_ARGS="${VEXII_EFFECTIVE_ARGS:+$VEXII_EFFECTIVE_ARGS }${MLKEM_HW_VEXII_ARGS[*]}"
   fi
   BUILD_DIR="${MLKEM_BUILD_DIR:-$LITEX_DIR/build/mlkem_hw_${MLKEM_HW_VALUE}_sw_${MLKEM_SW_VALUE}}"
+  if [ -z "${MLKEM_BUILD_DIR:-}" ] && config_has_feature "$MLKEM_HW_VALUE" keccak && [ "$MLKEM_KECCAK_ARCH" = compact ]; then
+    BUILD_DIR+="_keccak_compact"
+  fi
   [[ "$BUILD_DIR" = /* ]] || BUILD_DIR="$REPO_ROOT/$BUILD_DIR"
 }
 
@@ -176,6 +193,7 @@ preflight() {
   [ -f "$MLKEM_NATIVE_ROOT/mlkem/mlkem_native.c" ] \
     || die "submódulo mlkem-native ausente; rode: git submodule update --init external/mlkem-native"
   [ -f "$MLKEM_PATCH" ] || die "patch ML-KEM ausente: $MLKEM_PATCH"
+  [ -f "$MLKEM_BARRETT_PATCH" ] || die "patch Barrett ausente: $MLKEM_BARRETT_PATCH"
   [ -f "$PKG_DIR/bios/mlkem_accel_select.h" ] || die "header de seleção ausente"
   [ -f "$MLKEM_DIR/src/mlkem_keccak_vexii.h" ] || die "backend Keccak ausente"
 
@@ -216,6 +234,10 @@ preflight() {
     patch_state="pronto para aplicar"
   else
     die "external/mlkem-native não está limpo nem corresponde ao patch versionado"
+  fi
+  if ! git -C "$MLKEM_NATIVE_ROOT" apply --reverse --check "$MLKEM_BARRETT_PATCH" 2>/dev/null && \
+     ! git -C "$MLKEM_NATIVE_ROOT" apply --check "$MLKEM_BARRETT_PATCH" 2>/dev/null; then
+    die "estado incompatível com o patch Barrett: $MLKEM_BARRETT_PATCH"
   fi
 
   python_version="$(python3 -c 'import platform; print(platform.python_version())')"
@@ -263,9 +285,11 @@ write_accel_header() {
     printf '#define MLKEM_SW_ACCEL_NAME "%s"\n' "$MLKEM_SW_VALUE"
     config_has_feature "$MLKEM_HW_VALUE" montmul && printf '%s\n' '#define MLK_HW_HAS_MONTMUL'
     config_has_feature "$MLKEM_HW_VALUE" montred && printf '%s\n' '#define MLK_HW_HAS_MONTRED'
+    config_has_feature "$MLKEM_HW_VALUE" barrett && printf '%s\n' '#define MLK_HW_HAS_BARRETT'
     config_has_feature "$MLKEM_HW_VALUE" keccak && printf '%s\n' '#define MLK_HW_HAS_KECCAK'
     config_has_feature "$MLKEM_SW_VALUE" montmul && printf '%s\n' '#define MLK_USE_MONTMUL'
     config_has_feature "$MLKEM_SW_VALUE" montred && printf '%s\n' '#define MLK_USE_MONTRED'
+    config_has_feature "$MLKEM_SW_VALUE" barrett && printf '%s\n' '#define MLK_USE_BARRETT'
     config_has_feature "$MLKEM_SW_VALUE" keccak && printf '%s\n' '#define MLK_USE_KECCAK'
     printf '%s\n' '' \
       '#if defined(MLK_USE_MONTMUL) && !defined(MLK_HW_HAS_MONTMUL)' \
@@ -273,6 +297,9 @@ write_accel_header() {
       '#endif' '' \
       '#if defined(MLK_USE_MONTRED) && !defined(MLK_HW_HAS_MONTRED)' \
       '#error "MLK_USE_MONTRED requires a VexiiRiscv core with MontRedPlugin"' \
+      '#endif' '' \
+      '#if defined(MLK_USE_BARRETT) && !defined(MLK_HW_HAS_BARRETT)' \
+      '#error "MLK_USE_BARRETT requires a VexiiRiscv core with BarrettPlugin"' \
       '#endif' '' \
       '#if defined(MLK_USE_KECCAK) && !defined(MLK_HW_HAS_KECCAK)' \
       '#error "MLK_USE_KECCAK requires a VexiiRiscv core with KeccakPlugin"' \
@@ -335,7 +362,7 @@ write_manifest() {
   if [ -n "$bitstream" ] && command -v sha256sum >/dev/null 2>&1; then
     bitstream_hash="$(sha256sum "$bitstream" | awk '{print $1}')"
   fi
-  reports="$(find "$BUILD_DIR" -type f \( -name '*.rpt' -o -name '*.html' -o -name '*timing*' \) -print 2>/dev/null | sort || true)"
+  reports="$(find "$BUILD_DIR/gateware" -type f \( -name '*.rpt' -o -name '*.rpt.txt' -o -name '*.html' \) -print 2>/dev/null | sort || true)"
   {
     printf '# Manifesto do build dos aceleradores ML-KEM\n\n'
     printf -- '- Data: `%s`\n' "$(date --iso-8601=seconds)"
@@ -349,8 +376,13 @@ write_manifest() {
     printf -- '- CPU variant: `%s`\n' "$CPU_VARIANT"
     printf -- '- Vexii args: `%s`\n' "${VEXII_EFFECTIVE_ARGS:-<vazio>}"
     printf -- '- Clock alvo: `48000000 Hz`\n'
+    printf -- '- Barrett: `custom-0/0x0b, funct3=0, funct7=3; S16 centrado, extensão para XLEN`\n'
+    printf -- '- ROM/SRAM: `32 KiB / 32 KiB`\n'
     printf -- '- Keccak opcode: `custom-2/0x5b`, `funct7=0`, `funct3=0..3`\n'
-    printf -- '- Keccak latência nominal: `24 ciclos por permutação`\n'
+    if config_has_feature "$MLKEM_HW_VALUE" keccak; then
+      printf -- '- Keccak arquitetura: `%s`\n' "$MLKEM_KECCAK_ARCH"
+      printf -- '- Keccak latência nominal: `%s ciclos por permutação`\n' "$KECCAK_CYCLES"
+    fi
     printf -- '- Python: `%s`\n' "$(python3 -c 'import platform; print(platform.python_version())')"
     printf -- '- Meson: `%s`\n' "$(meson --version)"
     printf -- '- Ninja: `%s`\n' "$(ninja --version)"
@@ -362,6 +394,7 @@ write_manifest() {
 }
 
 BUILD_FLAGS=(--build)
+[ "$ACTION" = "--prepare" ] && BUILD_FLAGS+=(--no-compile-gateware --no-integrated-rom-auto-size --bios-stack-margin=4096)
 [ "$ACTION" = "--all" ] && BUILD_FLAGS+=(--load)
 VEXII_FLAGS=()
 [ -n "$VEXII_EFFECTIVE_ARGS" ] && VEXII_FLAGS+=(--vexii-args="$VEXII_EFFECTIVE_ARGS")
@@ -388,13 +421,17 @@ if python3 -m litex_boards.targets.sipeed_tang_primer_20k \
   --integrated-main-ram-size=0x100 \
   --output-dir="$BUILD_DIR" \
   "${BUILD_FLAGS[@]}"; then
-  write_manifest "sucesso"
+  if [ "$ACTION" = "--prepare" ]; then write_manifest "preparado sem Gowin"; else write_manifest "sucesso"; fi
 else
   result=$?
   write_manifest "falha (código $result)"
   exit "$result"
 fi
 
-say "Pronto. Para ler a UART"
-echo "    python3 -m serial.tools.miniterm $UART_DEV 115200 --raw"
+if [ "$ACTION" = "--prepare" ]; then
+  say "SoC e BIOS preparados sem executar Gowin: $BUILD_DIR/gateware"
+else
+  say "Pronto. Para ler a UART"
+  echo "    python3 -m serial.tools.miniterm $UART_DEV 115200 --raw"
+fi
 echo "    manifesto: $BUILD_DIR/mlkem_build_manifest.md"

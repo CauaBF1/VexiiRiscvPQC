@@ -16,6 +16,8 @@ class ParamKeccakSpec extends AnyFunSuite {
     val baseline = parse(Seq.empty)
     val keccak = parse(Seq("--with-keccak"))
     val all = parse(Seq("--with-montmul", "--with-montred", "--with-keccak"))
+    val compact = parse(Seq("--with-keccak", "--keccak-architecture", "compact"))
+    val full = parse(Seq("--with-keccak", "--keccak-architecture", "full"))
 
     assert(!baseline.withKeccak)
     assert(keccak.withKeccak && !keccak.withMontMul && !keccak.withMontRed)
@@ -28,5 +30,15 @@ class ParamKeccakSpec extends AnyFunSuite {
     assert(all.getName().contains("keccak"))
 
     assert(Set(baseline.hashCode(), keccak.hashCode(), all.hashCode()).size == 3)
+    assert(!full.keccakCompact && compact.keccakCompact)
+    assert(compact.getName().contains("keccakcompact"))
+    assert(full.getName() != compact.getName())
+    assert(full.hashCode() != compact.hashCode())
+  }
+
+  test("Keccak architecture rejects an unknown value") {
+    val param = new ParamSimple()
+    val parser = new scopt.OptionParser[Unit]("VexiiRiscv") { param.addOptions(this) }
+    assert(parser.parse(Seq("--keccak-architecture", "unknown"), ()).isEmpty)
   }
 }

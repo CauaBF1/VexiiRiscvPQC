@@ -16,6 +16,7 @@
 
 #ifdef MLK_PROFILE
 #include <stdint.h>
+#include "vexii_cycle.h"
 enum {
   MLK_PB_KECCAK = 0, /* keccak-f1600 permutation                         */
   MLK_PB_NTT,        /* ntt + invntt + basemul + mulcache                */
@@ -29,9 +30,7 @@ enum {
 extern uint64_t mlk_prof_cy[MLK_PB_N];
 extern uint32_t mlk_prof_n[MLK_PB_N];
 static inline uint64_t mlk_prof_rd(void) {
-  uint64_t v;
-  __asm__ volatile("rdcycle %0" : "=r"(v));
-  return v;
+  return vexii_read_cycle();
 }
 #define MLK_PROF_ENTER()  uint64_t _pf0 = mlk_prof_rd()
 #define MLK_PROF_EXIT(b)  do { mlk_prof_cy[(b)] += mlk_prof_rd() - _pf0; mlk_prof_n[(b)]++; } while (0)
