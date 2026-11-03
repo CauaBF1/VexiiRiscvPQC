@@ -81,8 +81,16 @@ object MmuSpec{
 }
 
 case class MmuTlbStorageEntryParam(
+  asidWidth: Int,
   checkUser: Boolean,
+  checkGlobal: Boolean,
   checkGuest: Boolean
+)
+
+case class MmuTlbStorageEntryQuery(
+  address: UInt,
+  asid: Bits,
+  guest: Bool
 )
 
 class MmuTlbStorageEntry(
@@ -98,11 +106,26 @@ class MmuTlbStorageEntry(
   val valid = Bool()
   val virtualAddress  = UInt(vw-log2Up(depth) bits)
   val physicalAddress = UInt(pw bits)
+  val asid = Bits(p.asidWidth bits)
   val allowRead, allowWrite, allowExecute = Bool()
   val allowUser = p.checkUser generate Bool()
   val guest = p.checkGuest generate Bool()
+  val global = p.checkGlobal generate Bool()
 
   def hit(address : UInt) = /*valid && */virtualAddress === address(spec.levels(levelId).virtualOffset + log2Up(depth), vw - log2Up(depth) bits)
+  def hit(query : MmuTlbStorageEntryQuery): Bool = {
+    val addressCheck = hit(query.address)
+    val asidCheck = (p.asidWidth > 0).mux(asid === query.asid, True) || p.checkGlobal.mux(global, False)
+    val guestCheck = p.checkGuest.mux(guest === query.guest, True)
+    addressCheck && asidCheck && guestCheck
+  }
+  def needFlush(query : MmuTlbStorageEntryQuery, anyAsid : Bool, anyAddress : Bool) = {
+    val addressCheck = hit(query.address) || anyAddress
+    val asidCheck = (p.asidWidth > 0).mux(asid === query.asid, True)
+    val globalCheck = (asidCheck && p.checkGlobal.mux(!global, True)) || anyAsid
+    val guestCheck = p.checkGuest.mux(guest === query.guest, True)
+    addressCheck && globalCheck && guestCheck
+  }
   def physicalAddressFrom(address : UInt) = physicalAddress @@ address(0, spec.levels(levelId).physicalOffset bits)
 }
 
@@ -145,7 +168,7 @@ class MmuTlbStorage(
   }
 }
 
-trait GenericMmuPlugin extends AddressTranslationService {
+abstract class GenericMmuPlugin extends FiberPlugin with AddressTranslationService {
   override def mayNeedRedo: Boolean = true
 
   case class PortSpec(stages: Seq[NodeBaseApi],
@@ -162,6 +185,8 @@ trait GenericMmuPlugin extends AddressTranslationService {
   val portSpecs = ArrayBuffer[PortSpec]()
 
   val storageSpecs = ArrayBuffer[MmuStorageSpec]()
+
+  val accessPipes = ArrayBuffer[StagePipeline]()
 
   override def newStorage(pAny: Any, pmuEventId : Int) : Any = {
     val p = pAny.asInstanceOf[MmuStorageParameter]
@@ -192,6 +217,58 @@ trait GenericMmuPlugin extends AddressTranslationService {
       )
     ).rsp
   }
+
+  override def newTranslationAccess(usage: AddressTranslationPortUsage,
+                                    portSpec: Any,
+                                    storageSpec: Any): AddressTranslationAccess = {
+    val pp = portSpec.asInstanceOf[MmuPortParameter]
+
+    val access = AddressTranslationAccess()
+    val pipe = accessPipes.addRet(new StagePipeline())
+    val stages = (0 to pp.ctrlAt).map(pipe.node)
+
+    val addressNode = stages(pp.readAt)
+    addressNode.arbitrateFrom(access.cmd)
+    val onAddress = new addressNode.Area {
+      val req = AddressTranslationReq(
+        PRE_ADDRESS     = insert(access.cmd.address),
+        LOAD            = insert(access.cmd.load),
+        STORE           = insert(access.cmd.store),
+        EXECUTE         = insert(access.cmd.execute),
+        FORCE_GUEST     = insert(access.cmd.forceGuest),
+        FORCE_PHYSICAL  = insert(access.cmd.forcePhysical)
+      )
+
+      val translationPort = newTranslationPort(
+        stages      = stages,
+        req         = req,
+        usage       = usage,
+        portSpec    = portSpec,
+        storageSpec = storageSpec
+      )
+    }
+
+    val checkNode = stages(pp.ctrlAt)
+    val onCheck = new checkNode.Area {
+      arbitrateTo(access.rsp)
+
+      val keys = onAddress.translationPort.keys
+      access.rsp.translated         := keys.TRANSLATED
+      access.rsp.hazard             := keys.HAZARD
+      access.rsp.refill             := keys.REFILL
+      access.rsp.pageFault          := keys.PAGE_FAULT
+      access.rsp.accessFault        := keys.ACCESS_FAULT
+      access.rsp.bypassTranslation  := keys.BYPASS_TRANSLATION
+      access.rsp.addressExtension   := keys.ADDRESS_EXTENSION
+    }
+
+    access
+  }
+
+  during patch {
+    portsLock.await()
+    accessPipes.map(_.build())
+  }
 }
 
 /**
@@ -205,7 +282,10 @@ trait GenericMmuPlugin extends AddressTranslationService {
  */
 class MmuPlugin(var spec : MmuSpec,
                 var physicalWidth : Int,
-                var asidWidth : Int) extends FiberPlugin with GenericMmuPlugin{
+                var asidWidth : Int,
+                var withGuestSfenceCheck : Boolean) extends GenericMmuPlugin{
+  def withGlobalCheck = asidWidth > 0
+
   override def isShadowMmu : Boolean = false
 
   val api = during build new Area{
@@ -213,12 +293,18 @@ class MmuPlugin(var spec : MmuSpec,
     val lsuTranslationEnable = Bool()
   }
 
+  override def getInvalidationPortParam = AddressTranslationInvalidationParam(
+    asidWidth       = asidWidth,
+    requestAddress  = true,
+    requestGuest    = withGuestSfenceCheck
+  )
+
   override def getSignExtension(kind: AddressTranslationPortUsage, rawAddress: UInt): Bool = {
     val translationEnable = kind match {
       case AddressTranslationPortUsage.FETCH => api.fetchTranslationEnable
       case AddressTranslationPortUsage.LOAD_STORE => api.lsuTranslationEnable
     }
-    translationEnable.mux(rawAddress(MIXED_WIDTH-1), False)
+    translationEnable.mux(rawAddress(VIRTUAL_WIDTH-1), False)
   }
 
   val logic = during setup new Area{
@@ -235,12 +321,15 @@ class MmuPlugin(var spec : MmuSpec,
 
     awaitBuild()
 
+    assert(!withGuestSfenceCheck || priv.implementHypervisor)
+
     PHYSICAL_WIDTH.set(physicalWidth)
     VIRTUAL_WIDTH.set(spec.virtualWidth)
     MIXED_WIDTH.set(VIRTUAL_WIDTH.get)
-    PC_WIDTH.set(MIXED_WIDTH)
-    TVAL_WIDTH.set(MIXED_WIDTH)
+    TVAL_WIDTH.set(XLEN.get min (MIXED_WIDTH.get + 1))
+    PC_WIDTH.set(TVAL_WIDTH)
     assert(VIRTUAL_WIDTH.get == XLEN.get || XLEN.get > VIRTUAL_WIDTH.get && VIRTUAL_WIDTH.get > physicalWidth)
+    assert(PC_WIDTH.get <= (VIRTUAL_WIDTH.get + 1) && PC_WIDTH.get >= VIRTUAL_WIDTH.get)
 
     val accessBus = access.newDBusAccess(priv.implementHypervisor)
 
@@ -281,11 +370,7 @@ class MmuPlugin(var spec : MmuSpec,
     csr.writeCancel(CSR.SATP, satpModeWrite =/= 0 && satpModeWrite =/= spec.satpMode)
 
     csr.allowCsr(CSR.SATP, !priv.logic.harts(0).m.status.tvm || priv.isMachine(0))
-    csr.onDecode(CSR.SATP) {
-      when (csr.bus.decode.write) {
-        csr.bus.decode.doTrap(TrapReason.SFENCE_VMA)
-      }
-    }
+    csr.trapNextOnWrite += CsrListFilter(List(CSR.SATP))
 
     if (priv.implementHypervisor) {
       csr.readWrite(CSR.VSSTATUS, 19 -> vsstatus.mxr, 18 -> vsstatus.sum)
@@ -297,11 +382,7 @@ class MmuPlugin(var spec : MmuSpec,
       csr.remapWhen(CSR.SATP, CSR.VSATP, PrivilegeMode.isGuest(priv.getPrivilege(0)))
 
       csr.allowCsr(CSR.VSATP, !priv.logic.harts(0).h.status.vtvm || priv.getPrivilege(0) =/= PrivilegeMode.VS)
-      csr.onDecode(CSR.VSATP) {
-        when (csr.bus.decode.write) {
-          csr.bus.decode.doTrap(TrapReason.SFENCE_VMA)
-        }
-      }
+      csr.trapNextOnWrite += CsrListFilter(List(CSR.VSATP))
     }
 
     csrLock.release()
@@ -310,7 +391,9 @@ class MmuPlugin(var spec : MmuSpec,
     assert(storageSpecs.map(_.p.priority).distinct.size == storageSpecs.size, "MMU storages needs different priorities")
     // Implement the hardware for all the TLB storages
     val tlbGenerateParam = MmuTlbStorageEntryParam(
+      asidWidth   = asidWidth,
       checkUser   = true,
+      checkGlobal = withGlobalCheck,
       checkGuest  = priv.implementHypervisor
     )
     val storages = for(ss <- storageSpecs) yield new MmuTlbStorage(spec, physicalWidth, tlbGenerateParam, ss)
@@ -333,6 +416,40 @@ class MmuPlugin(var spec : MmuSpec,
       api.lsuTranslationEnable clearWhen (!mprv || priv.logic.harts(0).m.status.mpp === PrivilegeMode.M)
     }
 
+    case class PermissionCheckRequest(
+      isGuestAccess      : Bool,
+      forceGuest         : Bool,
+      effectivePrivilege : UInt,
+      requestRead        : Bool,
+      requestWrite       : Bool,
+      requestExecute     : Bool,
+      lineAllowExecute   : Bool,
+      lineAllowRead      : Bool,
+      lineAllowWrite     : Bool,
+      lineAllowUser      : Bool,
+    )
+
+    def permissionCheck(req: PermissionCheckRequest) = new Area {
+      import req._
+
+      val isSupervisor = effectivePrivilege === PrivilegeMode.S
+      val isUser = effectivePrivilege === PrivilegeMode.U
+      val nominalSupervisor = priv.implementHypervisor.mux(forceGuest.mux(priv.logic.harts(0).h.status.spvp, isSupervisor), isSupervisor)
+      val nominalUser = priv.implementHypervisor.mux(forceGuest.mux(!priv.logic.harts(0).h.status.spvp, isUser), isUser)
+
+      val allow_mxr     = priv.implementHypervisor.mux(isGuestAccess.mux(vsstatus.mxr, False), False) || status.mxr
+      val allow_sum     = priv.implementHypervisor.mux(isGuestAccess.mux(vsstatus.sum, status.sum), status.sum)
+      val allow_execute = lineAllowExecute && !(lineAllowUser && nominalSupervisor)
+      val allow_read    = lineAllowRead || allow_mxr && lineAllowExecute
+      val allow_write   = lineAllowWrite
+
+      val privCheck     = (lineAllowUser && nominalSupervisor && !allow_sum) ||
+                          (!lineAllowUser && nominalUser)
+      val readCheck     = requestRead && !allow_read
+      val writeCheck    = requestWrite && !allow_write
+      val executeCheck  = requestExecute && !allow_execute
+      val page_fault    = privCheck || readCheck || writeCheck || executeCheck
+    }
 
     // Implement the hardware of very MMU ports on their respective pipelines / storages
     val portSpecsSorted = portSpecs.sortBy(_.ss.p.priority).reverse
@@ -342,13 +459,19 @@ class MmuPlugin(var spec : MmuSpec,
       val storage = storages.find(_.self == ps.ss).get
       val read = for (sl <- storage.sl) yield new Area {
         val readAddress = readStage(ps.req.PRE_ADDRESS)(sl.lineRange)
-        val forceGuest = ctrlStage(ps.req.FORCE_GUEST) || effectiveGuest
+        val forceGuest = hitsStage(ps.req.FORCE_GUEST) || effectiveGuest
+        val currentAsid = priv.implementHypervisor.mux(Mux(forceGuest, vsatp.asid, satp.asid), satp.asid)
         for ((way, wayId) <- sl.ways.zipWithIndex) {
+          val query = MmuTlbStorageEntryQuery(
+            address = hitsStage(ps.req.PRE_ADDRESS),
+            asid    = currentAsid,
+            guest   = priv.implementHypervisor.mux(forceGuest, True)
+          )
+
           readStage(sl.keys.ENTRIES)(wayId) := way.readAsync(readAddress)
-          hitsStage(sl.keys.HITS_PRE_VALID)(wayId) := hitsStage(sl.keys.ENTRIES)(wayId).hit(hitsStage(ps.req.PRE_ADDRESS))
+          hitsStage(sl.keys.HITS_PRE_VALID)(wayId) := hitsStage(sl.keys.ENTRIES)(wayId).hit(query)
           ctrlStage(sl.keys.HITS)(wayId) := ctrlStage(sl.keys.HITS_PRE_VALID)(wayId) &&
-            ctrlStage(sl.keys.ENTRIES)(wayId).valid &&
-            priv.implementHypervisor.mux(ctrlStage(sl.keys.ENTRIES)(wayId).guest === forceGuest, True)
+            ctrlStage(sl.keys.ENTRIES)(wayId).valid
         }
       }
 
@@ -361,10 +484,6 @@ class MmuPlugin(var spec : MmuSpec,
           case LOAD_STORE => mprv.mux(mpp, priv.getPrivilege(0).asUInt.resize(2))
           case FETCH => priv.getPrivilege(0).asUInt.resize(2)
         }
-        val isSupervisor = effectivePrivilege === PrivilegeMode.S
-        val isUser = effectivePrivilege === PrivilegeMode.U
-        val nominalSupervisor = priv.implementHypervisor.mux(ps.req.FORCE_GUEST.mux(priv.logic.harts(0).h.status.spvp, isSupervisor), isSupervisor)
-        val nominalUser = priv.implementHypervisor.mux(ps.req.FORCE_GUEST.mux(!priv.logic.harts(0).h.status.spvp, isUser), isUser)
         val hits = Cat(storage.sl.map(s => ctrlStage(s.keys.HITS)))
         val entries = storage.sl.flatMap(s => ctrlStage(s.keys.ENTRIES))
         val hit = hits.orR
@@ -377,31 +496,35 @@ class MmuPlugin(var spec : MmuSpec,
         val lineAllowUser    = entriesMux(_.allowUser)
         val lineTranslated   = entriesMux(_.physicalAddressFrom(ps.req.PRE_ADDRESS))
 
+        val permReq = PermissionCheckRequest(
+          isGuestAccess       = isGuestAccess,
+          forceGuest          = ps.req.FORCE_GUEST,
+          effectivePrivilege  = effectivePrivilege,
+          requestRead         = ps.req.LOAD,
+          requestWrite        = ps.req.STORE,
+          requestExecute      = ps.req.EXECUTE,
+          lineAllowExecute    = lineAllowExecute,
+          lineAllowRead       = lineAllowRead,
+          lineAllowWrite      = lineAllowWrite,
+          lineAllowUser       = lineAllowUser,
+        )
+
+        val permRsp = permissionCheck(permReq)
+
         val requireMmuLockup  = CombInit(ps.usage match {
           case LOAD_STORE => ps.req.FORCE_GUEST.mux(vsatpValid, api.lsuTranslationEnable)
           case FETCH => api.fetchTranslationEnable
         })
         requireMmuLockup clearWhen(ps.req.FORCE_PHYSICAL)
 
+        val badAddress = Global.checkBadAddress(ps.req.PRE_ADDRESS, ps.req.PRE_ADDRESS(VIRTUAL_WIDTH - 1))
+
         import ps.rsp.keys._
         when(requireMmuLockup) {
-          val allow_mxr     = priv.implementHypervisor.mux(isGuestAccess.mux(vsstatus.mxr, False), False) || status.mxr
-          val allow_sum     = priv.implementHypervisor.mux(isGuestAccess.mux(vsstatus.sum, status.sum), status.sum)
-          val allow_execute = lineAllowExecute && !(lineAllowUser && nominalSupervisor)
-          val allow_read    = lineAllowRead || allow_mxr && lineAllowExecute
-          val allow_write   = lineAllowWrite
-
-          val privCheck     = (lineAllowUser && nominalSupervisor && !allow_sum) ||
-                              (!lineAllowUser && nominalUser)
-          val readCheck     = ps.req.LOAD && !allow_read
-          val writeCheck    = ps.req.STORE && !allow_write
-          val executeCheck  = ps.req.EXECUTE && !allow_execute
-          val page_fault    = privCheck || readCheck || writeCheck || executeCheck
-
           HAZARD        := False
-          REFILL        := !hit
+          REFILL        := !(hit || badAddress)
           TRANSLATED    := lineTranslated
-          PAGE_FAULT    := page_fault
+          PAGE_FAULT    := permRsp.page_fault || badAddress
           ACCESS_FAULT  := False
         } otherwise {
           HAZARD        := False
@@ -434,6 +557,10 @@ class MmuPlugin(var spec : MmuSpec,
       val storageOhReg = Reg(Bits(storages.size bits))
       val storageEnable = Reg(Bool())
       val isTwoStage = Reg(Bool())
+      val forceGuest = Reg(Bool())
+      val permission = Reg(cloneOf(arbiter.io.output.permission))
+      val isGlobal = Reg(Bool())
+      val asid = Reg(Bits(asidWidth bits))
 
       arbiter.io.output.ready := False
       IDLE whenIsActive {
@@ -448,6 +575,13 @@ class MmuPlugin(var spec : MmuSpec,
           virtual := arbiter.io.output.address
           load.address := (ppn @@ spec.levels.last.vpn(arbiter.io.output.address) @@ U(0, log2Up(spec.entryBytes) bits)).resized
           isTwoStage := arbiter.io.output.indirect
+          forceGuest := arbiter.io.output.forceGuest
+          permission := arbiter.io.output.permission
+          isGlobal := False
+          asid := priv.implementHypervisor.mux(
+            Mux(arbiter.io.output.indirect, vsatp.asid, satp.asid),
+            satp.asid
+          )
           arbiter.io.output.ready := True
           goto(CMD(spec.levels.size - 1))
         }
@@ -498,6 +632,26 @@ class MmuPlugin(var spec : MmuSpec,
         }
       }
 
+      val permCheck = new Area {
+        val currentPrivilege = priv.getPrivilege(0).asUInt.resize(2)
+        val effectivePrivilege = permission.execute.mux(currentPrivilege, mprv.mux(mpp, currentPrivilege))
+        val req = PermissionCheckRequest(
+          isGuestAccess = isTwoStage,
+          forceGuest = forceGuest,
+          effectivePrivilege = effectivePrivilege,
+          requestRead = permission.read,
+          requestWrite = permission.write,
+          requestExecute = permission.execute,
+          lineAllowExecute = load.flags.X,
+          lineAllowRead = load.flags.R,
+          lineAllowWrite = load.flags.W && load.flags.D,
+          lineAllowUser = load.flags.U,
+        )
+
+        val rsp = permissionCheck(req)
+      }
+
+
       for (port <- refillPorts; rsp = port.rsp) {
         rsp.valid := False
         rsp.pageFault.assignDontCare()
@@ -540,6 +694,7 @@ class MmuPlugin(var spec : MmuSpec,
         val accessFault = pteReadError || (!pteFault && leafAccessFault)
         val guestFault = shadowReadError && !pteReadError
         val translationFault = pteFault || leafAccessFault
+        val permissionFault = permCheck.rsp.page_fault
 
         def doneLogic() : Unit = {
           val translatedAddress = load.levelToPhysicalAddress(levelId)
@@ -556,15 +711,15 @@ class MmuPlugin(var spec : MmuSpec,
 
           refillPorts.map(_.rsp).foreach { o =>
             o.bypass := False
-            o.pageFault := pageFault
+            o.pageFault := Mux(translationFault, pageFault, permissionFault)
             o.accessFault := accessFault
             o.guestFault := shadowReadError
             o.pf  := pageFault
             o.ae_ptw    := accessFault && !load.leaf
             o.ae_final  := accessFault && load.leaf //Note so sure
             o.level := spec.levels.size - 1 - levelId
-            o.address := Mux(translationFault,
-              Mux(shadowReadError, load.readed.asUInt, U(0)),
+            o.address := Mux(translationFault || permissionFault,
+              Mux(shadowReadError, load.readed.asUInt, load.address),
               translatedAddress
             ).resized
           }
@@ -588,6 +743,7 @@ class MmuPlugin(var spec : MmuSpec,
         RSP(levelId) whenIsActive{
           if(levelId == 0) load.exception setWhen(!load.leaf)
           when(load.rsp.valid){
+            isGlobal := load.flags.G | isGlobal
             levelId match {
               case 0 => rspCheck
               case _ => {
@@ -620,10 +776,12 @@ class MmuPlugin(var spec : MmuSpec,
             storageLevel.write.data.valid           := True
             storageLevel.write.data.virtualAddress  := virtual(specLevel.virtualOffset + log2Up(storageLevel.slp.sets), widthOf(storageLevel.write.data.virtualAddress) bits)
             storageLevel.write.data.physicalAddress := (load.levelToPhysicalAddress(levelId) >> specLevel.virtualOffset).resized
+            if (asidWidth > 0) storageLevel.write.data.asid := asid
             storageLevel.write.data.allowRead       := load.flags.R
             storageLevel.write.data.allowWrite      := load.flags.W && load.flags.D
             storageLevel.write.data.allowExecute    := load.flags.X
             storageLevel.write.data.allowUser       := load.flags.U
+            if (asidWidth > 0) storageLevel.write.data.global := isGlobal
             if (priv.implementHypervisor) storageLevel.write.data.guest := isTwoStage
 
             storageLevel.allocId.increment()
@@ -643,23 +801,51 @@ class MmuPlugin(var spec : MmuSpec,
       val depthMax = storageSpecs.map(_.p.levels.map(_.sets).max).max
       val counter = Reg(UInt(log2Up(depthMax) bits))
       val busy = RegInit(False)
+      val asid = RegInit(B(0, asidWidth bits))
+      val address = RegInit(U(0, MIXED_WIDTH bits))
+      val guest = withGuestSfenceCheck generate RegInit(False)
+      val force = RegInit(False)
+
+      val anyAsid = (asidWidth > 0).mux(RegInit(False), True)
+      val anyAddress = RegInit(False)
+      val query = MmuTlbStorageEntryQuery(
+        address = address,
+        asid    = asid,
+        guest   = withGuestSfenceCheck.mux(guest, False)
+      )
 
       arbiter.io.output.ready := False
       when(!busy){
         counter := 0
         when (arbiter.io.output.valid) {
           busy := True
+          asid := arbiter.io.output.asid.resized
+          address := arbiter.io.output.address.resized
+          anyAddress := arbiter.io.output.anyAddress || arbiter.io.output.force
+          if(asidWidth > 0) anyAsid := arbiter.io.output.anyAsid
+          force := arbiter.io.output.force
+          if (withGuestSfenceCheck) guest := arbiter.io.output.guest
         }
       } otherwise {
         assert(HART_COUNT.get == 1)
-        for (storage <- storages;
-             sl <- storage.sl) {
-          sl.write.mask := (default -> true)
-          sl.write.address := counter.resized
+        /* For addressed invalidation, each way only has at most one set will hit */
+        for (storage <- storages; sl <- storage.sl) {
+          val invalidateReadAddress = Mux(anyAddress, counter.resized, address(sl.lineRange))
+          val mask = B(sl.ways.map(way => {
+            val entry = way.readAsync(invalidateReadAddress)
+            entry.needFlush(query, anyAsid, anyAddress) || force
+          }))
+          sl.write.mask := mask
+          sl.write.address := invalidateReadAddress
           sl.write.data.valid := False
         }
-        counter := counter + 1
-        when(counter.andR){
+        when (anyAddress) {
+          counter := counter + 1
+          when(counter.andR){
+            busy := False
+            arbiter.io.output.ready := True
+          }
+        } otherwise {
           busy := False
           arbiter.io.output.ready := True
         }

@@ -1,6 +1,7 @@
 package vexiiriscv
 
 import spinal.core._
+import spinal.lib._
 import spinal.lib.misc.database.Database.blocking
 import spinal.lib.misc.pipeline.Payload
 import vexiiriscv.fetch.Fetch
@@ -27,12 +28,14 @@ object Global extends AreaRoot {
   val HART_COUNT       = blocking[Int]
   val CODE_WIDTH       = blocking[Int]
   val TRAP_ARG_WIDTH   = blocking[Int]
+  val TRAP_IPRIO_WIDTH = blocking[Int]
 
   def pcWithSignMsb = PHYSICAL_WIDTH < MIXED_WIDTH
   def expendPc(pc : UInt, width : Int) = Global.pcWithSignMsb.mux(
     pc.asSInt.resize(width bits).asUInt,
     pc.resize(width bits)
   )
+  def checkBadAddress(address: UInt, msb: Bool) = address.dropLow(VIRTUAL_WIDTH).asBools.map(_ =/= msb).orR
 
   // Pipelining keys
   val MIXED_ADDRESS = Payload(UInt(MIXED_WIDTH bits))
@@ -41,6 +44,7 @@ object Global extends AreaRoot {
   val PC_TARGET = Payload(UInt(PC_WIDTH-Fetch.SLICE_RANGE_LOW bits))
   val CODE = Payload(Bits(CODE_WIDTH bits))
   val TRAP_ARG = Payload(Bits(TRAP_ARG_WIDTH bits))
+  val TRAP_IPRIO = Payload(UInt(TRAP_IPRIO_WIDTH bits))
   val TVAL = Payload(Bits(TVAL_WIDTH bits))
   val TRAP = Payload(Bool())
   val COMMIT = Payload(Bool())
@@ -49,5 +53,4 @@ object Global extends AreaRoot {
   def HART_ID_WIDTH = log2Up(HART_COUNT)
   val HART_ID = Payload(UInt(HART_ID_WIDTH bits))
   def hartsIds = 0 until HART_COUNT
-
 }

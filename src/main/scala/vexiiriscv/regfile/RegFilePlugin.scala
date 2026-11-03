@@ -6,6 +6,7 @@ package vexiiriscv.regfile
 
 import spinal.core._
 import spinal.core.fiber._
+import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.eda.bench.{Bench, Rtl, XilinxStdTargets}
 import spinal.lib.misc.plugin.FiberPlugin
@@ -63,6 +64,29 @@ class RegFilePlugin(var spec : RegfileSpec,
     writes.map(_.port)
   }
 
+  override def simSetRegister(id: Int, value : BigInt) = {
+    require(!latchBased)
+    require(id >= 0 && id < physicalDepth)
+
+    if (!spec.x0AlwaysZero || id != 0) {
+      val written = value & ((BigInt(1) << rfpp.dataWidth) - 1)
+      val regfile = logic.regfile.fpga
+
+      if (regfile.asMem != null) {
+        regfile.asMem.ram.setBigInt(id, written)
+      } else if (regfile.asReg != null) {
+        regfile.asReg.ram(id) #= written
+      } else if (regfile.asAsyncDp != null) {
+        regfile.asAsyncDp.logic.ram.head.setBigInt(id, written)
+        regfile.asAsyncDp.logic.location.ram(id) #= 0
+      } else if (regfile.asSyncDp != null) {
+        regfile.asSyncDp.logic.ram.head.setBigInt(id, written)
+        regfile.asSyncDp.logic.location.ram(id) #= 0
+      } else {
+        assert(false, "Current register file backend does not support simulated register writes")
+      }
+    }
+  }
 
   override def initHold(): Bool = !logic.initalizer.done
 
@@ -128,7 +152,7 @@ class RegFilePlugin(var spec : RegfileSpec,
     val initalizer = new Area {
       val port = regfile.io.writes(writeGroups.zipWithIndex.find(_._1._2.exists(_.port.getName().contains(preferedWritePortForInit))).map(_._2).getOrElse(0))
       val counter = Reg(UInt(addressWidth + 1 bits)) init (0)
-      val done = counter.msb
+      val done = counter.msb.simPublic()
       when(!done) {
         port.valid := True
         port.address := counter.resized

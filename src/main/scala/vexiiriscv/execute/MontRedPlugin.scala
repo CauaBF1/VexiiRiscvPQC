@@ -3,9 +3,9 @@ package vexiiriscv.execute
 import spinal.core._
 import spinal.core.sim.SpinalSimConfig
 import spinal.lib._
-import vexiiriscv.{ParamSimple, VexiiRiscv}
+import vexiiriscv.ParamSimple
 import vexiiriscv.riscv.{IntRegFile, RS1, RS2, Riscv}
-import vexiiriscv.tester.TestOptions
+import vexiiriscv.tester.{TestBenchDut, TestOptions}
 
 // Custom instruction `montred rd, rs1` = Montgomery reduction of a full int32.
 // It computes exactly mlk_montgomery_reduce((int32)rs1) -- the reduction HALF of
@@ -75,7 +75,7 @@ object VexiiMontSim extends App {
   val compiled = simConfig.compile {
     val pa = param.pluginsArea()
     ParamSimple.setPma(pa.plugins)
-    VexiiRiscv(pa.plugins)
+    new TestBenchDut(Seq(pa.plugins))
   }
   testOpt.test(compiled)
 }

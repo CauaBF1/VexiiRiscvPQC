@@ -22,6 +22,11 @@ class StaticTranslationPlugin(var physicalWidth: Int, val translationLevel : Int
   override def getStorageId(s: Any): Int = 0
   override def getStorageIdWidth(): Int = 0
 
+  override def getInvalidationPortParam = AddressTranslationInvalidationParam(
+    asidWidth       = 0,
+    requestAddress  = false
+  )
+
   case class PortSpec(stages: Seq[NodeBaseApi],
                       req: AddressTranslationReq,
                       usage: AddressTranslationPortUsage,
@@ -41,6 +46,22 @@ class StaticTranslationPlugin(var physicalWidth: Int, val translationLevel : Int
         rsp = new AddressTranslationRsp(this, 0)
       )
     ).rsp
+  }
+
+  override def newTranslationAccess(usage: AddressTranslationPortUsage,
+                                    portSpec: Any,
+                                    storageSpec: Any): AddressTranslationAccess = {
+    val access = AddressTranslationAccess()
+    access.cmd.ready := access.rsp.ready
+    access.rsp.valid := access.cmd.valid
+    access.rsp.translated := access.cmd.address.resized
+    access.rsp.hazard := False
+    access.rsp.refill := False
+    access.rsp.pageFault := False
+    access.rsp.accessFault := access.cmd.address.drop(physicalWidth) =/= 0
+    access.rsp.bypassTranslation := True
+    access.rsp.addressExtension := False
+    access
   }
 
   override def getSignExtension(kind: AddressTranslationPortUsage, rawAddress: UInt): Bool = False

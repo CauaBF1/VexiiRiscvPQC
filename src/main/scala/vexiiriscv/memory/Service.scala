@@ -15,6 +15,7 @@ trait AddressTranslationPortUsage
 object AddressTranslationPortUsage{
   object FETCH extends AddressTranslationPortUsage
   object LOAD_STORE extends AddressTranslationPortUsage
+  object IMPLICIT_LOAD extends AddressTranslationPortUsage
 }
 
 case class AddressTranslationRefillCmdPerm() extends Bundle{
@@ -37,6 +38,13 @@ case class AddressTranslationRefillCmd(storageWidth : Int) extends Bundle{
   val indirect = Bool()
   val storageId = UInt(storageWidth bits)
   val storageEnable = Bool()
+
+  /*
+   * This is used to track translation requrest from HLV/HSV.
+   * This signal is only valid for first-stage MMU, for second-stage
+   * MMU, it will be always false.
+   */
+  val forceGuest = Bool()
 
   val permission = AddressTranslationRefillCmdPerm()
 }
@@ -76,15 +84,31 @@ case class AddressTranslationRefill(storageWidth : Int) extends Bundle{
   rsp.payload.setName("bits")
 }
 
-case class AddressTranslationInvalidationCmd() extends Bundle {
+case class AddressTranslationInvalidationParam(
+  asidWidth: Int = 0,
+  requestAddress: Boolean = false,
+  requestGuest: Boolean = false
+)
+
+case class AddressTranslationInvalidationCmd(p: AddressTranslationInvalidationParam) extends Bundle {
+  def withAnyAsid = p.asidWidth > 0
+  def withAnyAddress = p.requestAddress
+
   val hartId = HART_ID()
+  val asid = Bits(p.asidWidth bits)
+  val address = p.requestAddress generate MIXED_ADDRESS()
+  val guest = p.requestGuest generate Bool()
+  val anyAddress = p.requestAddress generate Bool()
+  val anyAsid = withAnyAsid generate Bool()
+  /* For reset */
+  val force = Bool()
 }
 
 /**
- * Used by the TrapPlugin to ask the MmuPlugin to invalidate its TLB (on SFENCE.VMA / SATP updates)
+ * Used by the TrapPlugin to ask the MmuPlugin to invalidate its TLB (on SFENCE.VMA)
  */
-case class AddressTranslationInvalidation() extends Bundle {
-  val cmd = Stream(AddressTranslationInvalidationCmd())
+case class AddressTranslationInvalidation(p: AddressTranslationInvalidationParam) extends Bundle {
+  val cmd = Stream(AddressTranslationInvalidationCmd(p))
 }
 
 /**
@@ -99,6 +123,7 @@ trait AddressTranslationService extends Area {
   def getStorageId(s : Any) : Int
   def getStorageIdWidth() : Int
   def getSignExtension(kind : AddressTranslationPortUsage, rawAddress : UInt) : Bool
+  def getInvalidationPortParam : AddressTranslationInvalidationParam
 
   val regionRetainer = Retainer()
 
@@ -109,11 +134,15 @@ trait AddressTranslationService extends Area {
                          portSpec: Any,
                          storageSpec: Any): AddressTranslationRsp
 
+  def newTranslationAccess(usage: AddressTranslationPortUsage,
+                           portSpec: Any,
+                           storageSpec: Any): AddressTranslationAccess
+
   val refillPorts = ArrayBuffer[AddressTranslationRefill]()
   def newRefillPort() = refillPorts.addRet(AddressTranslationRefill(getStorageIdWidth()))
 
   val invalidationPorts = ArrayBuffer[AddressTranslationInvalidation]()
-  def newInvalidationPort() = invalidationPorts.addRet(AddressTranslationInvalidation())
+  def newInvalidationPort() = invalidationPorts.addRet(AddressTranslationInvalidation(getInvalidationPortParam))
 }
 
 case class AddressTranslationReq(
@@ -138,6 +167,30 @@ class AddressTranslationRsp(s : AddressTranslationService, val wayCount : Int) e
     val BYPASS_TRANSLATION = Payload(Bool())
     val ADDRESS_EXTENSION = Payload(Bool())
   }
+}
+
+case class AddressTranslationAccessCmd() extends Bundle {
+  val address = MIXED_ADDRESS()
+  val load = Bool()
+  val store = Bool()
+  val execute = Bool()
+  val forceGuest = Bool()
+  val forcePhysical = Bool()
+}
+
+case class AddressTranslationAccessRsp() extends Bundle {
+  val translated = PHYSICAL_ADDRESS()
+  val hazard = Bool()
+  val refill = Bool()
+  val pageFault = Bool()
+  val accessFault = Bool()
+  val bypassTranslation = Bool()
+  val addressExtension = Bool()
+}
+
+case class AddressTranslationAccess() extends Bundle {
+  val cmd = Stream(AddressTranslationAccessCmd())
+  val rsp = Stream(AddressTranslationAccessRsp())
 }
 
 trait PmpService extends Area {

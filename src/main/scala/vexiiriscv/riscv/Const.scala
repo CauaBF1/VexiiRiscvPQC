@@ -156,6 +156,7 @@ object CSR {
   def MVIEN     = 0x308 // MRW Machine virtual interrupt enables.
   def MVIP      = 0x309 // MRW Machine virtual interrupt-pending bits.
   def MSTATUSH  = 0x310 // MRW Upper 32 bits of mstatus, RV32I only.
+  def MEDELEGH  = 0x312 // MRW Upper 32 bits of medeleg, RV32I only.
   def MIDELEGH  = 0x313 // MRW Upper 32 bits of mideleg, RV32I only.
   def MIEH      = 0x314 // Upper 32 bits of mie, RV32I only.
   def MVIENH    = 0x318 // Upper 32 bits of mvien, RV32I only.
@@ -193,10 +194,14 @@ object CSR {
   def MHPMCOUNTER0H = 0xB80 // MRW Machine instructions-retired counter.
   def MHPMCOUNTER3H = 0xB83 // MRW Machine instructions-retired counter.
   def MHPMEVENT0 = 0x320 // MRW Machine instructions-retired counter.
+  def MCYCLECFG = 0x321 // MRW Machine cycle counter configuration register.
+  def MINSTRETCFG = 0x322 // MRW Machine instret counter configuration register.
   def MHPMEVENT3 = 0x323 // MRW Machine instructions-retired counter.
   val MCOUNTEREN  = 0x306
   val MCOUNTINHIBIT = 0x320
   def MHPMEVENT0H = 0x720 // MRW Machine instructions-retired counter.
+  def MCYCLECFGH = 0x721 // MRW Upper 32 bits of mcyclecfg, RV32 only.
+  def MINSTRETCFGH = 0x722 // MRW Upper 32 bits of minstretcfg, RV32 only.
   def MTOPI     = 0xFB0 // MRO Machine top interrupt.
 
   val PMPCFG = 0x3a0
@@ -318,6 +323,7 @@ object InterruptInfo {
     10, 2, 6,   // VS interrupts: external, software, timer
     13          // Local interrupt: counter overflow
   )
+  def defaultOrderWidth = log2Up(defaultOrder.size + 1)
 }
 
 object IndirectCSR{

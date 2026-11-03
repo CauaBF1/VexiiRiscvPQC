@@ -48,7 +48,8 @@ case class LsuCachelessTimingParameter(var addressAt: Int = 0,
   * are stressed, but as this only impact the data path (no control path), it seems to be generally better.
   */
 class LsuCachelessPlugin(var layer : LaneLayer,
-                         var withAmo : Boolean,
+                         var withZaamo : Boolean,
+                         var withZalrsc : Boolean,
                          // WARNING, the fork cmd may be flushed out of existence before firing if
                          // any plugin doesn't flush from the first cycle after !freeze.
                          var withSpeculativeLoadFlush : Boolean,
@@ -63,13 +64,14 @@ class LsuCachelessPlugin(var layer : LaneLayer,
   override def accessWake: Bits = B(0)
   override def getLsuCachelessBus(): LsuCachelessBus = logic.bus
 
+  def withAtomics = withZaamo || withZalrsc
   def bufferSize = joinAt - forkAt + 1
   def busParam = LsuCachelessBusParam(
     addressWidth = Global.PHYSICAL_WIDTH,
     dataWidth = Riscv.LSLEN,
     hartIdWidth = Global.HART_ID_WIDTH,
     uopIdWidth = Decode.UOP_ID_WIDTH,
-    withAmo = withAmo,
+    withAmo = withAtomics,
     pendingMax = bufferSize
   )
 
@@ -90,7 +92,6 @@ class LsuCachelessPlugin(var layer : LaneLayer,
     val atsStorageLock = retains(ats.storageLock, sats.storageLock)
     val retainer = retains(List(elp.uopLock, srcp.elaborationLock, ifp.elaborationLock, ts.trapLock, ss.elaborationLock, cap.csrLock, ds.elaborationLock) ++ fpwbp.map(_.elaborationLock))
     awaitBuild()
-    Riscv.RVA.set(withAmo)
 
     val translationStorage = ats.newStorage(translationStorageParameter, PerformanceCounterService.DCACHE_TLB_CYCLES)
     val shadowTranslationStorage = sats.newStorage(translationStorageParameter, PerformanceCounterService.DCACHE_TLB_CYCLES)
@@ -104,7 +105,7 @@ class LsuCachelessPlugin(var layer : LaneLayer,
 
     val iwb = ifp.access(wbAt)
     val fpwb = fpwbp.map(_.createPort(wbAt))
-    val amos = Riscv.RVA.get.option(frontend.amos.uops).toList.flatten
+    val amos = frontend.amoUops
     for(load <- frontend.writingRf ++ amos){
       val op = layer(load)
 
@@ -170,7 +171,8 @@ class LsuCachelessPlugin(var layer : LaneLayer,
 
     val injectCtrl = elp.ctrl(0)
     val inject = new injectCtrl.Area {
-      SIZE := Decode.UOP(13 downto 12).asUInt
+      SIZE := Decode.UOP(Const.funct3Range).asUInt.resized
+      if(Riscv.LSU_SIZE_WIDTH > 2) SIZE.msb clearWhen(!Decode.UOP(2))
     }
 
     // Hardware elaboration
@@ -214,7 +216,7 @@ class LsuCachelessPlugin(var layer : LaneLayer,
       val MISS_ALIGNED = insert((1 to log2Up(LSLEN / 8)).map(i => SIZE === i && RAW_ADDRESS(i - 1 downto 0) =/= 0).orR) //TODO remove from speculLoad and handle it with trap
 
       when(GUEST) {
-        bypass(SIZE) := Decode.UOP(27 downto 26).asUInt
+        bypass(SIZE) := Decode.UOP(27 downto 26).asUInt.resized
       }
     }
 
@@ -303,11 +305,18 @@ class LsuCachelessPlugin(var layer : LaneLayer,
       bus.cmd.fromHart := True
       bus.cmd.hartId := Global.HART_ID
       bus.cmd.uopId := Decode.UOP_ID
-      if(withAmo) {
+      if(withAtomics) {
         bus.cmd.amoEnable := ATOMIC
         bus.cmd.amoOp     := UOP(31 downto 27)
       }
       //TODO amo AQ/RL
+
+      // PC RESIZED
+      val tvalAddress = Global.expendPc(onAddress.RAW_ADDRESS.resize(Global.MIXED_WIDTH), Global.TVAL_WIDTH)
+      val badAddress = (Riscv.XLEN.get > Global.MIXED_WIDTH.get).mux(onAddress.RAW_ADDRESS.drop(Global.MIXED_WIDTH.get).asBools.map(_ =/= tpk.ADDRESS_EXTENSION).orR, False)
+      if (Global.TVAL_WIDTH.get > Global.VIRTUAL_WIDTH.get) when (badAddress) {
+        tvalAddress(Global.VIRTUAL_WIDTH.get) := !onAddress.RAW_ADDRESS(Global.VIRTUAL_WIDTH.get - 1)
+      }
 
       val freezeIt = bus.cmd.isStall || doFence //TODO less combinatorial path
       elp.freezeWhen(freezeIt)
@@ -322,7 +331,7 @@ class LsuCachelessPlugin(var layer : LaneLayer,
       trapPort.valid :=  False
       trapPort.hartId := Global.HART_ID
       trapPort.laneAge := Execute.LANE_AGE
-      trapPort.tval := onAddress.RAW_ADDRESS.asBits.resized //PC RESIZED
+      trapPort.tval := tvalAddress.asBits
       trapPort.tval2 := tpk.TRANSLATED.asBits.dropLow(2).resized
       trapPort.exception.assignDontCare()
       trapPort.code.assignDontCare()
@@ -409,12 +418,11 @@ class LsuCachelessPlugin(var layer : LaneLayer,
         trapPort.code := STORE.mux[Bits](CSR.MCAUSE_ENUM.STORE_MISALIGNED, CSR.MCAUSE_ENUM.LOAD_MISALIGNED).andMask(onAddress.MISS_ALIGNED).resized
       }
 
-      val triggerId = B(OHToUInt(onTrigger.HITS))
-      when(onTrigger.HIT) {
+      when(onTrigger.HIT && !badAddress) {
         skip := True
         trapPort.exception := False
         trapPort.code := TrapReason.DEBUG_TRIGGER
-        trapPort.tval(triggerId.bitsRange) := B(OHToUInt(onTrigger.HITS))
+        trapPort.tval := onTrigger.HITS.resized
       }
 
       when(isValid && SEL && skip) {
@@ -437,10 +445,10 @@ class LsuCachelessPlugin(var layer : LaneLayer,
           bus.cmd.valid := cmd.valid
           bus.cmd.write := False
           bus.cmd.address := cmd.address
-          bus.cmd.size := cmd.size
+          bus.cmd.size := cmd.size.resized
           bus.cmd.fromHart := False
           bus.cmd.io := False
-          if(withAmo) bus.cmd.amoEnable := False
+          if(withAtomics) bus.cmd.amoEnable := False
         }
       }
     }
@@ -482,7 +490,7 @@ class LsuCachelessPlugin(var layer : LaneLayer,
       val rspPayload = readerValid.mux(CombInit(reader(_.payload)), busRspWithoutId)
       val rspAddress = reader(_.address)
 
-      val SC_MISS = insert(withAmo.mux(rspPayload.scMiss, False))
+      val SC_MISS = insert(if(withZalrsc) rspPayload.scMiss else False)
       val READ_DATA = insert(rspPayload.data)
       elp.freezeWhen(WITH_RSP && !rspValid)
       assert(!(isValid && isCancel && SEL && STORE && !up(Global.TRAP)), "LsuCachelessPlugin saw unexpected select && STORE && cancel request") //TODO add tpk.IO and along the way)) //TODO add tpk.IO and along the way
@@ -528,7 +536,7 @@ class LsuCachelessPlugin(var layer : LaneLayer,
       iwb.valid := SEL && !FLOAT
       iwb.payload := rspShifted.resized
 
-      if (withAmo) when(ATOMIC && !(LOAD || EXECUTE)) {
+      if (withZalrsc) when(ATOMIC && !(LOAD || EXECUTE)) {
         iwb.payload(0) := onJoin.SC_MISS
         iwb.payload(7 downto 1) := 0 // other bits set to 0 by using `LoadSpec(8, ...)` for the instruction
       }
@@ -537,7 +545,13 @@ class LsuCachelessPlugin(var layer : LaneLayer,
         p.valid := SEL && FLOAT
         p.payload := rspShifted.resized
         if(Riscv.RVD) when(SIZE === 2) {
-          p.payload(63 downto 32).setAll()
+          p.payload(Riscv.FLEN - 1 downto 32).setAll()
+        }
+        if(Riscv.RVZfh) when (SIZE === 1) {
+          p.payload(Riscv.FLEN - 1 downto 16).setAll()
+        }
+        if(Riscv.RVQ) when (SIZE === 3) {
+          p.payload(Riscv.FLEN - 1 downto 64).setAll()
         }
       }
     }

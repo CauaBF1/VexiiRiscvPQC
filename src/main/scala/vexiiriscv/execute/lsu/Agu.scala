@@ -18,7 +18,7 @@ object AguPlugin extends AreaObject {
   val STORE = Payload(Bool())
   val EXECUTE = Payload(Bool())
   val ATOMIC = Payload(Bool()) // LR => ATOMIC && LOAD && !STORE, SC => ATOMIC && !LOAD && STORE, AMO => ATOMIC && LOAD && STORE
-  val SIZE = Payload(UInt(2 bits)) // bytes = 1 << SIZE
+  val SIZE = Payload(UInt(LSU_SIZE_WIDTH bits)) // bytes = 1 << SIZE
   val FLOAT = Payload(Bool())
   val CLEAN, INVALIDATE = Payload(Bool())
   val GUEST = Payload(Bool())
@@ -56,6 +56,8 @@ class AguFrontend(
   val writeRfFloat = ArrayBuffer[MicroOp]()
   if (RVF) writeRfFloat ++= List(Rvfd.FLW)
   if (RVD) writeRfFloat ++= List(Rvfd.FLD)
+  if (RVZfh || RVZfbfmin) writeRfFloat ++= List(Rvfd.FLH)
+  if (RVQ) writeRfFloat ++= List(Rvfd.FLQ)
   writingRf ++= writeRfFloat
   for (op <- writingRf) add(op).srcs(sk.Op.ADD, sk.SRC1.RF, sk.SRC2.I).decode(dec(LOAD -> True, FLOAT -> Bool(writeRfFloat.contains(op))))
 
@@ -73,24 +75,31 @@ class AguFrontend(
   for (store <- writingMem) add(store).srcs(storeOps).decode(dec(STORE -> True))
   if (RVF) writingMem += add(Rvfd.FSW).srcs(storeOps).decode(dec(STORE -> True, FLOAT -> True)).uop
   if (RVD) writingMem += add(Rvfd.FSD).srcs(storeOps).decode(dec(STORE -> True, FLOAT -> True)).uop
+  if (RVZfh || RVZfbfmin) writingMem += add(Rvfd.FSH).srcs(storeOps).decode(dec(STORE -> True, FLOAT -> True)).uop
+  if (RVQ) writingMem += add(Rvfd.FSQ).srcs(storeOps).decode(dec(STORE -> True, FLOAT -> True)).uop
 
   val writingMemGuest = ArrayBuffer[MicroOp]()
   if (RVH) writingMemGuest ++= List(Rvh.HSV_B, Rvh.HSV_H, Rvh.HSV_W)
   if (RVH && XLEN.get == 64) writingMemGuest ++= List(Rvh.HSV_D)
   for (op <- writingMemGuest) writingMem += add(op).srcs(sk.Op.SRC1, sk.SRC1.RF).decode(dec(STORE -> True, GUEST -> True)).uop
 
-  // Atomic stuff
-  val amos = RVA.get generate new Area {
-    val uops = ArrayBuffer[MicroOp]()
-    uops ++= List(
+  val amoUops = ArrayBuffer[MicroOp]()
+
+  // AMO stuff
+  RVZaamo.get generate new Area {
+    amoUops ++= List(
       Rvi.AMOSWAPW, Rvi.AMOADDW, Rvi.AMOXORW, Rvi.AMOANDW, Rvi.AMOORW,
       Rvi.AMOMINW, Rvi.AMOMAXW, Rvi.AMOMINUW, Rvi.AMOMAXUW
     )
-    if(XLEN.get == 64) uops ++= List(
+    if(XLEN.get == 64) amoUops ++= List(
       Rvi.AMOSWAPD, Rvi.AMOADDD, Rvi.AMOXORD, Rvi.AMOANDD, Rvi.AMOORD,
       Rvi.AMOMIND, Rvi.AMOMAXD, Rvi.AMOMINUD, Rvi.AMOMAXUD
     )
-    for (amo <- uops) add(amo).srcs(sk.Op.SRC1, sk.SRC1.RF).decode(dec(LOAD -> True, STORE -> True, ATOMIC -> True))
+    for (amo <- amoUops) add(amo).srcs(sk.Op.SRC1, sk.SRC1.RF).decode(dec(LOAD -> True, STORE -> True, ATOMIC -> True))
+  }
+
+  // LR/SC stuff
+  RVZalrsc.get generate new Area {
     writingMem += add(Rvi.SCW).srcs(sk.Op.SRC1, sk.SRC1.RF).decode(dec(STORE -> True, ATOMIC -> True)).uop
     writingRf += Rvi.SCW
     writingRf  += add(Rvi.LRW).srcs(sk.Op.SRC1, sk.SRC1.RF).decode(dec(LOAD -> True, ATOMIC -> True)).uop

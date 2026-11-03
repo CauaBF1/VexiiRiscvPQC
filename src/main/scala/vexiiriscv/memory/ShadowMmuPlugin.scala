@@ -10,7 +10,7 @@ import vexiiriscv._
 import Global._
 import spinal.lib.misc.pipeline.{NodeBaseApi, Payload}
 import vexiiriscv.execute.{CsrAccessPlugin, CsrListFilter, CsrRamService}
-import vexiiriscv.memory.AddressTranslationPortUsage.{FETCH, LOAD_STORE}
+import vexiiriscv.memory.AddressTranslationPortUsage.{FETCH, IMPLICIT_LOAD, LOAD_STORE}
 import vexiiriscv.misc.{PerformanceCounterService, PipelineBuilderPlugin, PrivilegedPlugin, TrapReason}
 import vexiiriscv.riscv.{CSR, PrivilegeMode}
 import vexiiriscv.riscv.Riscv._
@@ -19,11 +19,17 @@ import scala.collection.mutable.ArrayBuffer
 
 class ShadowMmuPlugin(var spec : MmuSpec,
                       var physicalWidth : Int,
-                      var vmidWidth : Int) extends FiberPlugin with GenericMmuPlugin{
+                      var vmidWidth : Int) extends GenericMmuPlugin{
   override def isShadowMmu : Boolean = true
 
   /* Second stage is always zero-extended */
   def getSignExtension(kind: AddressTranslationPortUsage, rawAddress: UInt) = False
+
+  override def getInvalidationPortParam = AddressTranslationInvalidationParam(
+    asidWidth       = 0,
+    requestAddress  = false,
+    requestGuest    = false,
+  )
 
   val api = during build new Area{
     val fetchTranslationEnable = Bool()
@@ -87,7 +93,9 @@ class ShadowMmuPlugin(var spec : MmuSpec,
     assert(storageSpecs.map(_.p.priority).distinct.size == storageSpecs.size, "MMU storages needs different priorities")
     // Implement the hardware for all the TLB storages
     val tlbGenerateParam = MmuTlbStorageEntryParam(
+      asidWidth   = 0,
       checkUser   = false,
+      checkGlobal = false,
       checkGuest  = false
     )
     val storages = for(ss <- storageSpecs) yield new MmuTlbStorage(spec, physicalWidth, tlbGenerateParam, ss)
@@ -109,6 +117,10 @@ class ShadowMmuPlugin(var spec : MmuSpec,
       api.lsuTranslationEnable clearWhen(!isVirtual)
     }
 
+    def readAllowed(read: Bool, execute: Bool, implicitAccess: Bool): Bool = {
+      read || (execute && mmu.logic.status.mxr && !implicitAccess)
+    }
+
     // Implement the hardware of very MMU ports on their respective pipelines / storages
     val portSpecsSorted = portSpecs.sortBy(_.ss.p.priority).reverse
     val ports = for(ps <- portSpecsSorted) yield new Composite(ps.rsp, "logic", false){
@@ -118,8 +130,15 @@ class ShadowMmuPlugin(var spec : MmuSpec,
       val read = for (sl <- storage.sl) yield new Area {
         val readAddress = readStage(ps.req.PRE_ADDRESS)(sl.lineRange)
         for ((way, wayId) <- sl.ways.zipWithIndex) {
+          /* The shadow MMU should not enable the "ASID" and "GUEST" field of TLB */
+          val query = MmuTlbStorageEntryQuery(
+            address = hitsStage(ps.req.PRE_ADDRESS),
+            asid    = B(0),
+            guest   = False
+          )
+
           readStage(sl.keys.ENTRIES)(wayId) := way.readAsync(readAddress)
-          hitsStage(sl.keys.HITS_PRE_VALID)(wayId) := hitsStage(sl.keys.ENTRIES)(wayId).hit(hitsStage(ps.req.PRE_ADDRESS))
+          hitsStage(sl.keys.HITS_PRE_VALID)(wayId) := hitsStage(sl.keys.ENTRIES)(wayId).hit(query)
           ctrlStage(sl.keys.HITS)(wayId) := ctrlStage(sl.keys.HITS_PRE_VALID)(wayId) && ctrlStage(sl.keys.ENTRIES)(wayId).valid
         }
       }
@@ -139,7 +158,7 @@ class ShadowMmuPlugin(var spec : MmuSpec,
         val lineTranslated   = entriesMux(_.physicalAddressFrom(ps.req.PRE_ADDRESS))
 
         val requireMmuLockup  = CombInit(ps.usage match {
-          case LOAD_STORE => api.lsuTranslationEnable || (ps.req.FORCE_GUEST && hgatp.mode === spec.satpMode)
+          case LOAD_STORE | IMPLICIT_LOAD => api.lsuTranslationEnable || (ps.req.FORCE_GUEST && hgatp.mode === spec.satpMode)
           case FETCH => api.fetchTranslationEnable
         })
         /* Only process request from the guest */
@@ -148,7 +167,7 @@ class ShadowMmuPlugin(var spec : MmuSpec,
         import ps.rsp.keys._
         when(requireMmuLockup) {
           val allow_execute = lineAllowExecute
-          val allow_read    = lineAllowRead || mmu.logic.status.mxr && lineAllowExecute
+          val allow_read    = readAllowed(lineAllowRead, lineAllowExecute, if(ps.usage == IMPLICIT_LOAD) True else False)
           val allow_write   = lineAllowWrite
 
           val readCheck     = ps.req.LOAD && !allow_read
@@ -198,7 +217,7 @@ class ShadowMmuPlugin(var spec : MmuSpec,
       IDLE whenIsActive {
         when(arbiter.io.output.valid) {
           portOhReg := arbiter.io.chosenOH
-          storageOhReg := UIntToOh(arbiter.io.output.storageId)
+          storageOhReg := UIntToOh(arbiter.io.output.storageId).resize(storages.size)
           storageEnable := arbiter.io.output.storageEnable
           virtual := arbiter.io.output.address
           permission := arbiter.io.output.permission
@@ -302,7 +321,7 @@ class ShadowMmuPlugin(var spec : MmuSpec,
       }
 
       val permissionCheck = new Area {
-        val allowRead    = load.flags.R || (load.flags.X && mmu.logic.status.mxr && !isImplicitAccess)
+        val allowRead    = readAllowed(load.flags.R, load.flags.X, isImplicitAccess)
         val allowWrite   = load.flags.W && load.flags.D
         val allowExecute = load.flags.X
 

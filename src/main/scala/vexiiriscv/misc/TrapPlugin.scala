@@ -39,9 +39,24 @@ case class Trap(laneAgeWidth : Int, full : Boolean) extends Bundle{
   }
 }
 
-case class InterruptState(width: Int) extends Bundle {
-  val id = UInt(width bits)
-  val priority = UInt(width bits)
+case class extendedInterruptPriority() extends Bundle {
+  /*
+   * A high-priority interrupt means its default priority is higher than
+   * external interrupt.
+   */
+  val high = Bool()
+  val external = Bool()
+  val local = UInt(TRAP_IPRIO_WIDTH bits)
+  val default = UInt(InterruptInfo.defaultOrderWidth bits)
+}
+
+object extendedInterruptPriority {
+  implicit def priorityAsUInt(p: extendedInterruptPriority) = p.asBits.asUInt
+}
+
+case class InterruptState(idWidth: Int, priorityWidth: Int) extends Bundle {
+  val id = UInt(idWidth bits)
+  val priority = UInt(priorityWidth bits)
   val privilege = PrivilegeMode.TYPE()
   val valid = Bool()
 }
@@ -206,7 +221,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
 
         if (priv.p.withSupervisor) {
           privilegs = PrivilegeMode.S :: privilegs
-          privilegeAllowInterrupts += PrivilegeMode.S -> ((csr.s.status.sie && !csr.withMachinePrivilege) || !csr.withSupervisorPrivilege)
+          privilegeAllowInterrupts += PrivilegeMode.S -> ((csr.s.status.sie && !csr.withMachinePrivilege) || !csr.withHostSupervisorPrivilege)
         }
 
         if (priv.p.withUserTrap) {
@@ -216,7 +231,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
 
         if (priv.p.withHypervisor) {
           privilegs = PrivilegeMode.VS :: privilegs
-          privilegeAllowInterrupts += PrivilegeMode.VS -> ((csr.vs.status.sie && csr.withGuestPrivilege) || !csr.withVirtualSupervisorPrivilege)
+          privilegeAllowInterrupts += PrivilegeMode.VS -> ((csr.vs.status.sie && csr.isGuestMode) || !csr.withVirtualSupervisorPrivilege)
         }
 
         val privilegeTriggers = privilegs.map(p => new Area {
@@ -224,11 +239,11 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
             i => (i.privilege <= p) && //EX : Machine timer interrupt can't go into
             privilegs.filter(_ > p).forall(e => i.delegators.exists(_.privilege == e)) // EX : Supervisor timer need to have machine mode delegator
           ).map(i => {
-            val int = InterruptState(CODE_WIDTH)
+            val int = InterruptState(CODE_WIDTH, TRAP_IPRIO_WIDTH)
             val delegUpOn = i.delegators.filter(_.privilege > p).map(_.enable).fold(True)(_ && _)
             val delegDownOff = !i.delegators.filter(_.privilege <= p).map(_.enable).orR
 
-            int.id := i.id;
+            int.id := i.id
             int.priority := i.priority
             int.privilege := p
             int.valid := i.cond && delegUpOn && delegDownOff
@@ -236,33 +251,88 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
             int
           })
 
-          val triggered = RegNext(interrupts.reduceBalancedTree((a, b) => {
-            val priorityCheck = (a.privilege > b.privilege) || ((a.privilege === b.privilege) && (a.priority < b.priority))
+          val result = RegNext(interrupts.reduceBalancedTree((a, b) => {
+            val priorityCheck = (a.priority < b.priority)
             val takeA = !b.valid || (a.valid && (priorityCheck))
             takeA ? a | b
           }))
+
+          val triggerId = B(result.id).andMask(result.valid).resized
+          val triggerPriority = result.priority.andMask(result.valid).resized
+          p match {
+            case PrivilegeMode.M  => {
+              csr.m.candidate.interrupt := triggerId
+              csr.m.candidate.priority  := triggerPriority
+            }
+            case PrivilegeMode.S  => {
+              csr.s.candidate.interrupt := triggerId
+              csr.s.candidate.priority  := triggerPriority
+            }
+            case PrivilegeMode.VS => {
+              csr.vs.candidate.interrupt := triggerId
+              csr.vs.candidate.priority  := triggerPriority
+            }
+          }
+
+          val injects = csr.spec.injectedInterrupt.filter(i => i.privilege == p)
+          val injectInterrupts = injects.nonEmpty generate injects.map(i => {
+            val int = InterruptState(CODE_WIDTH, widthOf(extendedInterruptPriority()))
+            int.id := i.id.resized
+            int.priority := i.priority.resized
+            int.privilege := p
+            int.valid := i.cond
+
+            int
+          })
+
+          val injectResult = injects.nonEmpty generate RegNext(injectInterrupts.reduceBalancedTree((a, b) => {
+            val priorityCheck = a.priority < b.priority
+            val takeA = !b.valid || (a.valid && (priorityCheck))
+            takeA ? a | b
+          }))
+
+          val triggered = injects.nonEmpty.mux(injectResult, result)
+
+          val effectiveInterrupt = B(triggered.id).andMask(triggered.valid).resized
+          val effectivePriority = UInt(8 bits)
+          val withLocalOrder = widthOf(triggered.priority) > InterruptInfo.defaultOrderWidth
+          val localPriority = withLocalOrder.mux(triggered.priority.drop(InterruptInfo.defaultOrderWidth).resize(TRAP_IPRIO_WIDTH).asUInt, triggered.priority)
+          val defaultPriority = triggered.priority.resize(InterruptInfo.defaultOrderWidth)
+          val priorityBuilder = WhenBuilder()
+          priorityBuilder.when(!triggered.valid) {
+            effectivePriority := 0
+          }
+          if (TRAP_IPRIO_WIDTH.get > 8) priorityBuilder.when(localPriority > 255) {
+            effectivePriority := 255
+          }
+          priorityBuilder.when(localPriority === 0) {
+            val higher = defaultPriority < InterruptInfo.defaultOrder.indexOf((p == PrivilegeMode.M).mux(11, 9))
+            effectivePriority := Mux(higher, U(0), U(255))
+          }
+          priorityBuilder.otherwise {
+            effectivePriority := triggered.priority.resized
+          }
         })
 
         val privilegeIndexedTriggers = privilegs.zip(privilegeTriggers)
 
         /* Link xTOPI register */
-        val xtopi = privilegeIndexedTriggers.map{case (p, i) => new Area {
-          val triggered = i.triggered
-          val int = B(triggered.id).andMask(triggered.valid).resized
-
-          p match {
-            case PrivilegeMode.M  => csr.m.topi.interrupt := int
-            case PrivilegeMode.S  => csr.s.topi.interrupt := int
-            case PrivilegeMode.VS => csr.vs.topi.interrupt := int
+        privilegeIndexedTriggers.foreach{case (p, i) => p match {
+            case PrivilegeMode.M  => csr.m.topi.interrupt := i.effectiveInterrupt
+            case PrivilegeMode.S  => csr.s.topi.interrupt := i.effectiveInterrupt
+            case PrivilegeMode.VS => {
+              csr.vs.topi.interrupt := i.effectiveInterrupt
+              csr.vs.topi.priority  := i.effectivePriority
+            }
           }
-        }}
+        }
 
         val result = privilegeIndexedTriggers.map{case (p, i) => {
-          val int = InterruptState(CODE_WIDTH)
+          val int = InterruptState(CODE_WIDTH, 0)
           val triggered = i.triggered
 
           int.id := triggered.id
-          int.priority := triggered.priority
+          int.priority.assignDontCare()
           int.privilege := triggered.privilege
           int.valid := triggered.valid && privilegeAllowInterrupts(p)
 
@@ -285,7 +355,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
         val pendingInterrupt = validBuffer && priv.api.harts(hartId).allowInterrupts
         csr.int.pending setWhen(pendingInterrupt)
 
-        when(csr.spec.interrupt.map(_.cond).orR){
+        when(privilegeIndexedTriggers.map(_._2.triggered.valid).orR){
           askWake(hartId)
         }
       }
@@ -435,27 +505,38 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
             val isGuestRefill = pending.state.arg(2) || PrivilegeMode.isGuest(priv.getPrivilege(hartId)) || (csr.m.status.mprv && csr.m.status.mpv)
             refill.cmd.valid := False
             refill.cmd.indirect := isGuestRefill
+            refill.cmd.forceGuest := pending.state.arg(2)
             refill.cmd.permission.read := !pending.state.arg(1)
             refill.cmd.permission.write := pending.state.arg(0, 2 bits) === TrapArg.STORE
             refill.cmd.permission.execute := pending.state.arg(1)
             refill.cmd.storageEnable := True
-            refill.cmd.address := pending.state.tval.asUInt
+            refill.cmd.address := (TVAL_WIDTH.get > VIRTUAL_WIDTH.get).mux(
+              pending.state.tval.dropHigh(1).asUInt,
+              pending.state.tval.asUInt,
+            )
             refill.cmd.storageId := pending.state.arg(3, ats.getStorageIdWidth() bits).asUInt
             refill.rsp.ready := False
 
             val invalidate = ats.newInvalidationPort()
             invalidate.cmd.valid := False
             invalidate.cmd.hartId := hartId
+            invalidate.cmd.address := pending.state.tval.asUInt.resized
+            invalidate.cmd.asid := pending.state.tval2.resized
+            if (invalidate.p.requestGuest) invalidate.cmd.guest := pending.state.arg(0)
+            invalidate.cmd.anyAddress := pending.state.arg(1)
+            if (invalidate.cmd.withAnyAsid) invalidate.cmd.anyAsid := pending.state.arg(2)
 
             val invalidated = RegInit(False) setWhen(invalidate.cmd.fire)
             invalidate.cmd.valid setWhen(!invalidated)
             resetToRunConditions += invalidated
+            invalidate.cmd.force := !invalidated
           }
 
           val satsPorts = sats.mayNeedRedo generate new Area{
             val refill = sats.newRefillPort()
             refill.cmd.valid := False
             refill.cmd.indirect := False
+            refill.cmd.forceGuest := False
             refill.cmd.permission.read := !pending.state.arg(1)
             refill.cmd.permission.write := pending.state.arg(0, 2 bits) === TrapArg.STORE
             refill.cmd.permission.execute := pending.state.arg(1)
@@ -528,7 +609,10 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
           if (fl1p.nonEmpty) fetchL1Invalidate(hartId).cmd.valid := False
           if (lsu.nonEmpty) lsuL1Invalidate(hartId).cmd.valid := False
           val trapEnterDebug = RegInit(False)
-          val triggerEbreak = (priv.p.debugTriggers == 0).mux(False, !pending.state.exception && pending.state.code === TrapReason.DEBUG_TRIGGER && csr.trigger.slots.reader(pending.state.tval.asUInt.resized)(_.tdata1.doEbreak))
+          val triggerEbreak = (priv.p.debugTriggers == 0).mux(
+            False,
+            !pending.state.exception && pending.state.code === TrapReason.DEBUG_TRIGGER && !csr.trigger.slots.zipWithIndex.map { case (slot, slotId) => pending.state.tval(slotId) && !slot.tdata1.doEbreak}.orR
+          )
           val triggerEbreakReg = Reg(Bool())
           // Got a trap, need to figure out exactly what to do.
           COMPUTE.whenIsActive{
@@ -536,8 +620,10 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
             if(priv.p.debugTriggers > 0 ) {
               pending.state.exception setWhen(triggerEbreak) //Patch to reduce logic in next stages
               when(!pending.state.exception && pending.state.code === TrapReason.DEBUG_TRIGGER) {
-                csr.trigger.slots.onSel(U(pending.state.tval).resized) { slot =>
-                  slot.tdata1.hit := True
+                for ((slot, slotId) <- csr.trigger.slots.zipWithIndex) {
+                  when(pending.state.tval(slotId)) {
+                    slot.tdata1.hit := True
+                  }
                 }
               }
             }
@@ -553,6 +639,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
                     doIt setWhen(csr.privilege === PrivilegeMode.M && csr.debug.dcsr.ebreakm)
                     if (priv.p.withUser) doIt setWhen (csr.privilege === PrivilegeMode.U && csr.debug.dcsr.ebreaku)
                     if (priv.p.withSupervisor) doIt setWhen (csr.privilege === PrivilegeMode.S && csr.debug.dcsr.ebreaks)
+                    if (priv.p.withHypervisor) doIt setWhen ((csr.privilege === PrivilegeMode.VS && csr.debug.dcsr.ebreakvs) || (csr.privilege === PrivilegeMode.VU && csr.debug.dcsr.ebreakvu))
                   }
                   doIt setWhen(buffer.trap.interrupt && csr.debug.doHalt)
                   when(doIt){
@@ -591,7 +678,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
                     uop = pending.uop,
                     compressed = pending.uopIsCompressed,
                     rvfd = RVF || RVD,
-                    rva = RVA,
+                    rva = RVZaamo || RVZalrsc,
                     xlen = XLEN.get,
                   )
                   buffer.trap.pseudoUop := transformer.inst
@@ -698,8 +785,8 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
                 atsPorts.refill.rsp.ready := True
                 pending.state.exception := True
                 if (priv.p.withHypervisor) when(atsPorts.isGuestRefill) {
-                  buffer.trap.tval2 := atsPorts.refill.rsp.address.dropLow(2).asBits.resized
                   when (atsPorts.refill.rsp.guestFault) {
+                    buffer.trap.tval2 := atsPorts.refill.rsp.address.dropLow(2).asBits.resized
                     buffer.trap.pseudoUop := (XLEN.get == 32).mux(0x00002000, 0x00003000)
                   }
                 }
@@ -719,6 +806,12 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
                   add(TrapArg.FETCH_LSU | 8, CSR.MCAUSE_ENUM.LOAD_GUEST_PAGE_FAULT)
                 }
                 goto(TRAP_TVAL)
+
+                if (priv.p.withDebug) {
+                  when (csr.debugMode) {
+                    goto(ENTER_DEBUG_WAIT)
+                  }
+                }
               } otherwise {
                 if(sats.mayNeedRedo) {
                   when (atsPorts.isGuestRefill) {
@@ -750,7 +843,9 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
               goto(JUMP) // improvement: shave one cycle
               when(satsPorts.refill.rsp.pageFault || satsPorts.refill.rsp.accessFault) {
                 pending.state.exception := True
-                buffer.trap.tval2 := satsPorts.refill.rsp.address.dropLow(2).asBits.resized
+                when (satsPorts.refill.rsp.pageFault) {
+                  buffer.trap.tval2 := satsPorts.refill.rsp.address.dropLow(2).asBits.resized
+                }
                 switch(satsPorts.refill.rsp.accessFault ## pending.state.arg(1 downto 0)){
                   def add(k : Int, v : Int) = is(k){pending.state.code := v}
                   add(TrapArg.FETCH | 4, CSR.MCAUSE_ENUM.INSTRUCTION_ACCESS_FAULT)
@@ -763,6 +858,13 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
                   add(TrapArg.FETCH_LSU, CSR.MCAUSE_ENUM.LOAD_GUEST_PAGE_FAULT)
                 }
                 goto(TRAP_TVAL)
+
+                if (priv.p.withDebug) {
+                  when (csr.debugMode) {
+                    api.harts(hartId).redo := False
+                    goto(ENTER_DEBUG_WAIT)
+                  }
+                }
               }
             }
           }
@@ -839,6 +941,13 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
           }
 
           val readed = RegNextWhen(crsPorts.read.data, crsPorts.read.valid && crsPorts.read.ready)
+          if (PC_WIDTH.get > VIRTUAL_WIDTH.get) {
+            when (Global.checkBadAddress(crsPorts.read.data.asUInt, crsPorts.read.data(VIRTUAL_WIDTH - 1))) {
+              // Others bits will be dropped, so only change msb of the PC
+              readed(PC_WIDTH - 1) := !crsPorts.read.data(VIRTUAL_WIDTH - 1)
+            }
+          }
+
           TRAP_TVEC.whenIsActive {
             crsPorts.read.valid := True
             val addressMapping = mutable.LinkedHashMap[Int, UInt](
@@ -947,6 +1056,7 @@ class TrapPlugin(val trapAt : Int, val recordHtinst : Boolean) extends FiberPlug
               pcPort.valid := True
               pcPort.pc := U(readed).resized //PC RESIZED
               csr.privilege := csr.debug.dcsr.prv
+              csr.xretAwayFromMachine setWhen (csr.debug.dcsr.prv =/= PrivilegeMode.M)
               csr.hartRunning := True
               csr.debug.bus.resume.rsp.valid := True
               goto(RUNNING)
