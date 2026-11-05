@@ -18,6 +18,7 @@ CPU_VARIANT="${CPU_VARIANT:-standard}"
 VEXII_ARGS="${VEXII_ARGS:-}"
 MLKEM_KECCAK_ARCH="${MLKEM_KECCAK_ARCH:-full}"
 MLKEM_RUNTIME_BENCH="${MLKEM_RUNTIME_BENCH:-0}"
+MLKEM_RUNTIME_SELECTED="${MLKEM_RUNTIME_SELECTED:-0}"
 UART_DEV="${UART_DEV:-/dev/ttyUSB2}"
 MLKEM_DIR="$REPO_ROOT/src/main/c/vexii/mlkem512"
 MLKEM_PATCH="$REPO_ROOT/external/mlkem-native.patch"
@@ -77,7 +78,8 @@ resolve_accel_config() {
   valid_accel_config "$MLKEM_HW_VALUE" || die "MLKEM_HW inválido: $MLKEM_HW_VALUE"
   valid_accel_config "$MLKEM_SW_VALUE" || die "MLKEM_SW inválido: $MLKEM_SW_VALUE"
   case "$MLKEM_RUNTIME_BENCH" in 0|1) ;; *) die "MLKEM_RUNTIME_BENCH deve ser 0 ou 1" ;; esac
-  if [ "$MLKEM_RUNTIME_BENCH" = 1 ] && { [ "$MLKEM_HW_VALUE" != all ] || [ "$MLKEM_SW_VALUE" != all ]; }; then
+  case "$MLKEM_RUNTIME_SELECTED" in 0|1) ;; *) die "MLKEM_RUNTIME_SELECTED deve ser 0 ou 1" ;; esac
+  if [ "$MLKEM_RUNTIME_BENCH" = 1 ] && [ "$MLKEM_RUNTIME_SELECTED" = 0 ] && { [ "$MLKEM_HW_VALUE" != all ] || [ "$MLKEM_SW_VALUE" != all ]; }; then
     die "benchmark runtime exige MLKEM_HW=all e MLKEM_SW=all (sem Barrett)"
   fi
   case "$MLKEM_KECCAK_ARCH" in
@@ -118,6 +120,7 @@ resolve_accel_config() {
     BUILD_DIR+="_keccak_$MLKEM_KECCAK_ARCH"
   fi
   if [ -z "${MLKEM_BUILD_DIR:-}" ] && [ "$MLKEM_RUNTIME_BENCH" = 1 ]; then BUILD_DIR+="_runtime"; fi
+  if [ -z "${MLKEM_BUILD_DIR:-}" ] && [ "$MLKEM_RUNTIME_SELECTED" = 1 ]; then BUILD_DIR+="_selected"; fi
   [[ "$BUILD_DIR" = /* ]] || BUILD_DIR="$REPO_ROOT/$BUILD_DIR"
 }
 
@@ -298,7 +301,8 @@ write_accel_header() {
     printf '#define MLKEM_HW_ACCEL_NAME "%s"\n' "$MLKEM_HW_VALUE"
     printf '#define MLKEM_SW_ACCEL_NAME "%s"\n' "$MLKEM_SW_VALUE"
     if [ "$MLKEM_RUNTIME_BENCH" = 1 ]; then
-      printf '%s\n' '#define MLK_RUNTIME_ACCEL' '#include "mlkem_accel_runtime.h"'
+      printf '%s\n' '#define MLK_RUNTIME_ACCEL'
+      [ "$MLKEM_RUNTIME_SELECTED" = 1 ] && printf '%s\n' '#define MLK_RUNTIME_SELECTED'
     fi
     config_has_feature "$MLKEM_HW_VALUE" montmul && printf '%s\n' '#define MLK_HW_HAS_MONTMUL'
     config_has_feature "$MLKEM_HW_VALUE" montred && printf '%s\n' '#define MLK_HW_HAS_MONTRED'
@@ -308,6 +312,7 @@ write_accel_header() {
     config_has_feature "$MLKEM_SW_VALUE" montred && printf '%s\n' '#define MLK_USE_MONTRED'
     config_has_feature "$MLKEM_SW_VALUE" barrett && printf '%s\n' '#define MLK_USE_BARRETT'
     config_has_feature "$MLKEM_SW_VALUE" keccak && printf '%s\n' '#define MLK_USE_KECCAK'
+    [ "$MLKEM_RUNTIME_BENCH" = 1 ] && printf '%s\n' '#include "mlkem_accel_runtime.h"'
     printf '%s\n' '' \
       '#if defined(MLK_USE_MONTMUL) && !defined(MLK_HW_HAS_MONTMUL)' \
       '#error "MLK_USE_MONTMUL requires a VexiiRiscv core with MontMulPlugin"' \
@@ -389,7 +394,7 @@ write_manifest() {
     printf -- '- LiteX-Boards: `%s`\n' "$(git -C "$(dirname "$BOARD_TARGET")" rev-parse HEAD)"
     printf -- '- Hardware: `%s`\n' "$MLKEM_HW_VALUE"
     printf -- '- Firmware: `%s`\n' "$MLKEM_SW_VALUE"
-    printf -- '- Benchmark runtime C/Montgomery/Montgomery+Keccak: `%s`\n' "$MLKEM_RUNTIME_BENCH"
+    printf -- '- Benchmark runtime: `%s`; perfil selecionado: `%s`\n' "$MLKEM_RUNTIME_BENCH" "$MLKEM_RUNTIME_SELECTED"
     printf -- '- CPU variant: `%s`\n' "$CPU_VARIANT"
     printf -- '- Vexii args: `%s`\n' "${VEXII_EFFECTIVE_ARGS:-<vazio>}"
     printf -- '- Clock alvo: `48000000 Hz`\n'

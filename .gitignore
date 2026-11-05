@@ -75,6 +75,7 @@ __pycache__/
 *.pyc
 !litex/tang_primer_20k/resultados/**/*.json
 !litex/tang_primer_20k/resultados/**/*.log
+litex/tang_primer_20k/.bench.lock
 
 # Configuração e artefatos locais do Codex
 /.codex/

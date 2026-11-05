@@ -168,13 +168,19 @@ int litex_mlkem_kat_status(void)
 {
 #ifdef MLK_RUNTIME_ACCEL
   int pass = 1;
-  for (mlkem_runtime_mode = 0; mlkem_runtime_mode < 3; mlkem_runtime_mode++) {
+#ifdef MLK_RUNTIME_SELECTED
+  const unsigned backends = 2;
+#else
+  const unsigned backends = 3;
+#endif
+  for (mlkem_runtime_mode = 0; mlkem_runtime_mode < backends; mlkem_runtime_mode++) {
     printf("[MLKEM] backend=%lu\n", (unsigned long)mlkem_runtime_mode);
     for (unsigned sample = 0; sample < 5; sample++) {
       printf("[MLKEM] sample=%u\n", sample);
       pass &= run_kat();
     }
   }
+  printf("[MLKEM] BENCH DONE %s\n", pass ? "PASS" : "FAIL");
   return pass;
 #else
   return run_kat();

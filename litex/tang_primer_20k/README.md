@@ -177,45 +177,106 @@ inclua `_zbb` (core e firmware sempre com a mesma ISA). Combinável com o sweet-
 
 ## Executar no vlab
 
-### Modo simples com benchmarks salvos (push no GitHub → pull no vlab)
+### Benchmark em um comando (push → pull → executar)
 
-Um único comando usa o checkout `~/VexiiRiscvPQC` já existente (sem criar worktrees ou diretórios extras fora do `build/` padrão do LiteX), compila o SoC com `MLKEM_HW=all MLKEM_SW=all MLKEM_RUNTIME_BENCH=1`, grava apenas a **SRAM** da placa, captura a UART e salva os resultados em `litex/tang_primer_20k/resultados/<timestamp>_keccak_<arch>/` (`RESUMO.md`, `ciclos.csv`, `resultado.json`, `uart.log`, `programador.log`, `mlkem_build_manifest.md`, `build.log.gz` e relatórios Gowin em `relatorios/`).
+No mesmo checkout do vlab, o runner seleciona o ambiente `~/litex-env`, `~/litex`
+e o Gowin. Ele verifica Java **17 ou superior**, usa SpinalHDL do próprio checkout
+e atualiza **somente os submódulos limpos** `ext/SpinalHDL` e `ext/rvls` para os
+commits fixados pelo repositório. Se houver alterações nesses dois submódulos,
+para e as preserva. `external/mlkem-native` conserva os patches locais; o overlay
+runtime é gerado dentro do `build/` padrão. Não é necessário criar outro checkout.
 
-Na mesma imagem e em um único boot, o firmware mede 5 amostras do vetor KAT em cada backend: `0 = C`, `1 = Montgomery` e `2 = Montgomery+Keccak`.
+O erro `DebugTransportModuleSwd`/`flushBusParam`/assinaturas RVLS indica APIs de
+dependências incompatíveis. O erro `UnixDomainSocketAddress` com Java 11 também
+exige um JDK mais recente. O runner escolhe um JDK 17+ instalado; se não existir,
+a preparação única no Ubuntu é `sudo apt install openjdk-17-jdk`.
 
-**1. Nesta máquina (enviar alterações para o GitHub):**
+**Nesta máquina**, revise e envie somente estes arquivos (não inclua `env.sh` nem
+as alterações internas de `external/mlkem-native`):
 
 ```bash
 cd ~/VexiiRiscvPQC
 git status --short
-# adicione os arquivos da campanha e envie para origin/dev:
-git add src/ litex/tang_primer_20k/
-git commit -m "keccak: fluxo git + benchmark runtime na Tang 20K"
+git add .gitignore litex/tang_primer_20k/bench_keccak.sh \
+  litex/tang_primer_20k/bench_keccak.py litex/tang_primer_20k/bench_support.py \
+  litex/tang_primer_20k/test_bench_keccak.py litex/tang_primer_20k/deploy.sh \
+  litex/tang_primer_20k/prepare_runtime_backend.py litex/tang_primer_20k/README.md \
+  litex/tang_primer_20k/bios/mlkem_litex.c litex/tang_primer_20k/resultados/.gitkeep \
+  src/main/c/vexii/mlkem512/src/mlkem_accel_runtime.h \
+  src/main/c/vexii/mlkem512/src/mlkem_keccak_vexii.h
+git commit -m "bench: perfis de aceleracao e preflight do vlab"
 git push origin dev
 ```
 
-**2. No vlab (atualizar e rodar tudo):**
+**No vlab**, atualize e escolha um perfil:
 
 ```bash
 cd ~/VexiiRiscvPQC
 git pull --ff-only origin dev
-./litex/tang_primer_20k/bench_keccak.sh
+./litex/tang_primer_20k/bench_keccak.sh -keccak
 ```
 
-Variações opcionais no vlab:
+| Comando/opção | Hardware e firmware | Medições no mesmo boot |
+|---|---|---|
+| `-montgomery` | MontMul + MontRed | 5× C + 5× Montgomery |
+| `-montgomery_barrett` (também `-montgomery_barret`) | Montgomery + Barrett | 5× C + 5× perfil |
+| `-barrett` | Barrett | 5× C + 5× Barrett |
+| `-keccak` | Keccak | 5× C + 5× Keccak |
+| `-montgomery -keccak` | Montgomery + Keccak | 5× C + 5× perfil |
+| `-all` | Montgomery + Barrett + Keccak | 5× C + 5× perfil |
+| Sem opção de perfil | Montgomery + Keccak | 5× C + 5× Montgomery + 5× Montgomery+Keccak (legado) |
+
+O baseline C desativa também Barrett quando esse acelerador está presente. Os
+perfis selecionados geram apenas o hardware solicitado. A viabilidade de área e
+timing de cada perfil depende do build Gowin; a opção não garante que caiba.
+São cinco repetições do mesmo vetor KAT, em um único boot, não cinco boots.
 
 ```bash
-KECCAK=full ./litex/tang_primer_20k/bench_keccak.sh       # full | compact | sliced8 (default) | sliced16
-./litex/tang_primer_20k/bench_keccak.sh --skip-build      # regrava a SRAM e remede sem recompilar
-UART_DEV=/dev/ttyUSB3 OFL_FTDI_SERIAL="FactoryAIOT Pro" ./litex/tang_primer_20k/bench_keccak.sh
+./litex/tang_primer_20k/bench_keccak.sh -montgomery_barret
+./litex/tang_primer_20k/bench_keccak.sh -montgomery -keccak --arch sliced8
+./litex/tang_primer_20k/bench_keccak.sh -keccak --skip-build
+./litex/tang_primer_20k/bench_keccak.sh -keccak --plan   # só mostra configuração
+./litex/tang_primer_20k/bench_keccak.sh -keccak --check  # checagem sem build/placa/sync Git
+UART_DEV=/dev/ttyUSB3 OFL_FTDI_SERIAL="FactoryAIOT Pro" ./litex/tang_primer_20k/bench_keccak.sh -keccak
 ```
 
-**3. No vlab (opcional — versionar os resultados de volta no GitHub):**
+`--arch` aceita `full`, `compact`, `sliced8` (padrão) e `sliced16`; `KECCAK=full`
+continua válido. `--skip-build` exige uma imagem concluída por este runner, com
+fontes/perfil/argumentos e SHA-256 correspondentes. Builds antigos sem identidade,
+interrompidos ou com conteúdos `.fs` divergentes exigem reconstrução. Cópias
+idênticas produzidas pelo LiteX/Gowin são aceitas. Não escolhe o `.fs` pela
+data. O runner impede duas execuções simultâneas neste checkout.
+
+Cada tentativa salva automaticamente em
+`litex/tang_primer_20k/resultados/<data>_<perfil>_<arch>_<id>/`:
+
+- `RESUMO.md`, `resultado.json`, `ciclos.csv`: KATs, amostras, medianas e speedup contra C;
+- `execucao.log`, `build.log.gz` quando houve build, mesmo em falha de compilação;
+- `uart.log`, `programador.log`, identidade e SHA-256 do bitstream quando capturados;
+- manifesto e relatórios Gowin, incluindo os HTML de timing, quando disponíveis.
+
+Há uma única tentativa de build, limitada a **20 minutos** incluindo o término
+forçado. Falha ou timeout guarda o diagnóstico e encerra com código diferente de
+zero, sem programar a imagem anterior. A gravação usa **SRAM** (`-m`), com UART
+aberta e lida durante a programação, sem outro terminal. Falhas do programador e
+capturas incompletas preservam os dados parciais e não são marcadas como PASS.
+KAT PASS comprova correção dos vetores; os relatórios de área/timing precisam ser
+avaliados separadamente.
+
+Para devolver os resultados pelo GitHub, no vlab:
 
 ```bash
 git add litex/tang_primer_20k/resultados
-git commit -m "bench: resultados keccak Tang 20K"
+git commit -m "bench: resultados Tang 20K"
 git push origin dev
+```
+
+Depois, nesta máquina: `git pull --ff-only origin dev`.
+
+Validação offline dos seletores, parser e persistência (não usa placa):
+
+```bash
+python3 -m unittest discover -s litex/tang_primer_20k -p test_bench_keccak.py -v
 ```
 
 ---

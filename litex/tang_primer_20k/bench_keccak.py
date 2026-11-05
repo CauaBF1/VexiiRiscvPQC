@@ -15,12 +15,15 @@ import json
 import re
 import shutil
 import statistics
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 BACKENDS = {0: "C", 1: "Montgomery", 2: "Montgomery+Keccak"}
+PROFILE_NAMES = {"both": "Montgomery", "barrett": "Barrett", "montgomery-barrett": "Montgomery+Barrett",
+                 "keccak": "Keccak", "all": "Montgomery+Keccak", "all-barrett": "Montgomery+Barrett+Keccak"}
 OPS = ("keypair", "encaps", "decaps")
 SAMPLES = 5
 END_MARKERS = ("Done (No Console)", "No boot medium found")
@@ -31,31 +34,39 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def analyze(text):
+def analyze(text, profile=None):
     """Separa a UART por backend e confere KAT, matches e ciclos de cada amostra."""
     clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text).replace("\r", "")
     parts = re.split(r"\[MLKEM\] backend=(\d+)", clean)
+    expected = BACKENDS if profile is None else {0: "C", 1: PROFILE_NAMES[profile]}
     backends = []
     for index in range(1, len(parts), 2):
         backend, body = int(parts[index]), parts[index + 1]
         samples = []
-        for chunk in re.split(r"\[MLKEM\] sample=\d+", body)[1:]:
-            cycles = {op: re.search(r"bench_%s_cycles=(\d+)" % op, chunk) for op in OPS}
-            ok = (all(cycles.values())
-                  and "[MLKEM] KAT PASS" in chunk
+        chunks = re.split(r"\[MLKEM\] sample=(\d+)", body)
+        for pos in range(1, len(chunks), 2):
+            sample_id, chunk = int(chunks[pos]), chunks[pos + 1]
+            cycles = {op: re.findall(r"bench_%s_cycles=(\d+)" % op, chunk) for op in OPS}
+            ok = (all(len(v) == 1 and int(v[0]) > 0 for v in cycles.values())
+                  and chunk.count("[MLKEM] KAT PASS") == 1
                   and all("[MLKEM] %s match: ok" % n in chunk for n in ("pk", "sk", "ct", "ss"))
                   and "[MLKEM] ss self-match: ok" in chunk
+                  and all("[MLKEM] %s: ok" % n in chunk for n in ("keypair", "encaps", "decaps"))
                   and not re.search(r"\[MLKEM\].*(?:FAIL|fail|first_diff)", chunk))
-            row = {op: int(m.group(1)) if m else None for op, m in cycles.items()}
-            row["total"] = sum(row.values()) if all(cycles.values()) else None
+            row = {op: int(v[0]) if len(v) == 1 else None for op, v in cycles.items()}
+            row["sample"] = sample_id
+            row["total"] = sum(row[k] for k in OPS) if all(row[k] is not None for k in OPS) else None
             row["kat_pass"] = ok
             samples.append(row)
         clock = re.search(r"bench_clock_hz=(\d+)", body)
-        backends.append({"backend": backend, "name": BACKENDS.get(backend, str(backend)),
+        backends.append({"backend": backend, "name": expected.get(backend, str(backend)),
                          "clock_hz": int(clock.group(1)) if clock else None, "samples": samples})
-    complete = ([b["backend"] for b in backends] == list(BACKENDS)
-                and all(len(b["samples"]) == SAMPLES for b in backends))
-    passed = complete and all(s["kat_pass"] for b in backends for s in b["samples"])
+    complete = ([b["backend"] for b in backends] == list(expected)
+                and all([s["sample"] for s in b["samples"]] == list(range(SAMPLES)) for b in backends))
+    profile_ok = profile is None or all(
+        re.findall(r"\[MLKEM\] %s_accel=([^\s]+)" % kind, clean) == [profile] * (2 * SAMPLES)
+        for kind in ("hw", "sw"))
+    passed = complete and profile_ok and all(s["kat_pass"] for b in backends for s in b["samples"])
     # Medianas e speedup contra C (backend 0), a partir dos totais de cada amostra.
     base = None
     for b in backends:
@@ -72,35 +83,50 @@ def analyze(text):
 
 
 def capture(args, out):
-    """Abre a UART antes de gravar a SRAM e lê até 15 KATs, marcador final ou timeout."""
-    import serial  # pyserial, já presente no ambiente LiteX
+    """Read UART during programming too, preserving partial data on all exits."""
+    import serial
 
     uart = args.uart or next((p for p in DEFAULT_UARTS if Path(p).exists()), DEFAULT_UARTS[-1])
     loader = ["openFPGALoader", "-b", "tangprimer20k"] + args.loader_arg + ["-m", str(args.bitstream)]
+    target_kats = (2 if args.profile else 3) * SAMPLES
+    process = None
     log = bytearray()
-    with serial.Serial(uart, 115200, timeout=0.5) as port:
-        port.reset_input_buffer()
-        prog = subprocess.run(loader, capture_output=True, text=True)
-        (out / "programador.log").write_text("$ " + " ".join(loader) + "\n" + prog.stdout + prog.stderr)
-        if prog.returncode != 0:
-            raise SystemExit(f"openFPGALoader falhou (código {prog.returncode}); veja {out/'programador.log'}")
-        print(f"==> SRAM gravada; lendo {uart} por até {args.timeout}s")
-        deadline = time.monotonic() + args.timeout
-        while time.monotonic() < deadline:
-            chunk = port.read(4096)
-            if chunk:
-                log += chunk
-                sys.stdout.write(chunk.decode(errors="replace"))
-                sys.stdout.flush()
-            text = log.decode(errors="replace")
-            if len(re.findall(r"\[MLKEM\] KAT (?:PASS|FAIL)", text)) >= len(BACKENDS) * SAMPLES:
-                time.sleep(1.0)
-                log += port.read(port.in_waiting or 1)
-                break
-            if any(m in text for m in END_MARKERS) and "[MLKEM]" in text:
-                break
-    (out / "uart.log").write_bytes(bytes(log))
-    return uart, loader, log.decode(errors="replace")
+    with (out / "uart.log").open("wb") as raw, (out / "programador.log").open("w") as programmer:
+        programmer.write("$ " + shlex.join(loader) + "\n")
+        programmer.flush()
+        try:
+            with serial.Serial(uart, 115200, timeout=0.1) as port:
+                port.reset_input_buffer()
+                process = subprocess.Popen(loader, stdout=programmer, stderr=subprocess.STDOUT)
+                start = time.monotonic()
+                deadline = start + args.timeout
+                while time.monotonic() < deadline:
+                    chunk = port.read(port.in_waiting or 1)
+                    if chunk:
+                        raw.write(chunk)
+                        raw.flush()
+                        log += chunk
+                        sys.stdout.write(chunk.decode(errors="replace"))
+                        sys.stdout.flush()
+                    code = process.poll()
+                    if code is not None and code != 0:
+                        raise RuntimeError(f"openFPGALoader falhou (código {code}); veja programador.log")
+                    if code is None and time.monotonic() - start > 60:
+                        raise RuntimeError("openFPGALoader excedeu 60s; captura parcial preservada")
+                    text = log.decode(errors="replace")
+                    if code == 0 and ("[MLKEM] BENCH DONE" in text or
+                            len(re.findall(r"\[MLKEM\] KAT (?:PASS|FAIL)", text)) >= target_kats or
+                            any(m in text for m in END_MARKERS)):
+                        break
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+    return uart, shlex.join(loader), log.decode(errors="replace")
 
 
 def save(out, result, meta):
@@ -109,10 +135,10 @@ def save(out, result, meta):
         writer.writerow(["backend", "nome", "amostra", *OPS, "total", "kat_pass"])
         for b in result["backends"]:
             for i, s in enumerate(b["samples"]):
-                writer.writerow([b["backend"], b["name"], i, *(s[k] for k in OPS), s["total"], s["kat_pass"]])
+                writer.writerow([b["backend"], b["name"], s["sample"], *(s[k] for k in OPS), s["total"], s["kat_pass"]])
     (out / "resultado.json").write_text(json.dumps({**meta, **result}, indent=2, ensure_ascii=False) + "\n")
     lines = [f"# Benchmark ML-KEM-512 Tang Primer 20K — {meta['data']}", "",
-             f"- Status: **{'PASS' if result['passed'] else 'FALHA/INCOMPLETO'}**",
+             f"- Status: **{meta.get('status', 'PASS' if result['passed'] else 'FALHA/INCOMPLETO')}**",
              *(f"- {k}: `{v}`" for k, v in meta.items() if k != "data"), "",
              "| backend | keypair | encaps | decaps | total (mediana) | speedup total vs C | KAT |",
              "|---|---:|---:|---:|---:|---:|---|"]
@@ -121,7 +147,7 @@ def save(out, result, meta):
         kats = sum(x["kat_pass"] for x in b["samples"])
         lines.append(f"| {b['name']} | {m['keypair']} | {m['encaps']} | {m['decaps']} | {m['total']} "
                      f"| {s['total']} | {kats}/{len(b['samples'])} PASS |")
-    lines += ["", "Ciclos do `timer0` (clock nominal da UART). Medianas de 5 amostras do mesmo vetor KAT,",
+    lines += ["", "Ciclos do `timer0` (frequência nominal informada pelo firmware). Medianas de 5 amostras do mesmo vetor KAT,",
               "em um único boot. Relatórios Gowin copiados em `relatorios/`; leia o timing antes",
               "de tirar conclusões físicas."]
     (out / "RESUMO.md").write_text("\n".join(lines) + "\n")
@@ -133,10 +159,12 @@ def copy_reports(build_dir, out):
     """Copia relatórios pequenos do Gowin e o manifesto; arquivos grandes só têm hash registrado."""
     dest, large = out / "relatorios", {}
     for path in sorted(Path(build_dir).glob("gateware/**/*")):
-        if path.is_file() and re.search(r"(\.rpt(\.txt|\.html)?|\.tr(\.html)?|_rsc\.xml|\.timing_paths)$", path.name):
+        if path.is_file() and re.search(r"(\.rpt(\.txt|\.html)?|\.tr(\.html)?|_tr(_content)?\.html|_rsc\.xml|\.timing_paths)$", path.name):
             if path.stat().st_size <= 2_000_000:
                 dest.mkdir(exist_ok=True)
-                shutil.copy2(path, dest / path.name)
+                target = dest / path.relative_to(Path(build_dir) / "gateware")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
             else:
                 large[str(path)] = sha256(path)
     manifest = Path(build_dir) / "mlkem_build_manifest.md"
@@ -145,39 +173,78 @@ def copy_reports(build_dir, out):
     return large
 
 
+def finalize(out, exit_code, stage, build_dir=None):
+    import gzip
+    result_file = out / "resultado.json"
+    if result_file.exists():
+        result = json.loads(result_file.read_text())
+    else:
+        result = {"passed": False, "complete": False, "backends": [],
+                  "data": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "rotulo": ""}
+    result.update(process_exit_code=exit_code, stage=stage)
+    if exit_code:
+        result["passed"] = False
+    if build_dir:
+        result["relatorios_grandes_sha256"] = copy_reports(build_dir, out)
+    build_log = out / "build.log"
+    if build_log.is_file():
+        with build_log.open("rb") as source, gzip.open(out / "build.log.gz", "wb") as dest:
+            shutil.copyfileobj(source, dest)
+        build_log.unlink()
+    if stage == "checagem" and exit_code == 0:
+        result["status"] = "AMBIENTE OK (benchmark não executado)"
+    elif not result["passed"] and "error" not in result:
+        result["error"] = f"Etapa {stage}, código {exit_code}; veja execucao.log e build.log.gz, quando presente."
+    meta = {k: v for k, v in result.items() if k not in ("passed", "complete", "backends")}
+    save(out, result, meta)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bitstream", type=Path, help=".fs gerado (padrão: o mais novo em BUILD_DIR/gateware)")
-    parser.add_argument("--build-dir", type=Path, help="diretório de build do deploy.sh")
-    parser.add_argument("--output", type=Path, required=True, help="diretório de resultados (é criado)")
-    parser.add_argument("--uart", help="porta serial (padrão: by-id da Sipeed, senão /dev/ttyUSB2)")
-    parser.add_argument("--loader-arg", action="append", default=[], help="argumento extra do openFPGALoader")
+    parser.add_argument("--bitstream", type=Path, help=".fs exato gerado pelo build")
+    parser.add_argument("--build-dir", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--existing-output", action="store_true")
+    parser.add_argument("--profile", choices=("both", "barrett", "montgomery-barrett", "keccak", "all", "all-barrett"),
+                        help="compara C e perfil; omitido analisa modo legado de três backends")
+    parser.add_argument("--uart", help="by-id da Sipeed; fallback /dev/ttyUSB2")
+    parser.add_argument("--loader-arg", action="append", default=[])
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--label", default="", help="texto livre registrado no resultado")
-    parser.add_argument("--parse-only", type=Path, help="apenas analisa um uart.log existente")
+    parser.add_argument("--label", default="")
+    parser.add_argument("--parse-only", type=Path)
+    parser.add_argument("--finalize", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--exit-code", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("--stage", default="erro", help=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    args.output.mkdir(parents=True, exist_ok=False)
+    if args.finalize:
+        finalize(args.finalize, args.exit_code, args.stage, args.build_dir)
+        return
+    if not args.output:
+        parser.error("--output é obrigatório")
+    if args.timeout <= 0:
+        parser.error("--timeout deve ser positivo")
+    args.output.mkdir(parents=True, exist_ok=args.existing_output)
     meta = {"data": datetime.datetime.now().astimezone().isoformat(timespec="seconds"), "rotulo": args.label}
-    if args.parse_only:
-        shutil.copy2(args.parse_only, args.output / "uart.log")
-        text = args.parse_only.read_text(errors="replace")
-    else:
-        if not args.bitstream:
-            if not args.build_dir:
-                raise SystemExit("informe --bitstream ou --build-dir (ou --parse-only)")
-            found = sorted(Path(args.build_dir).glob("gateware/**/*.fs"), key=lambda p: p.stat().st_mtime)
-            if not found:
-                raise SystemExit(f"nenhum .fs em {args.build_dir}/gateware")
-            args.bitstream = found[-1]
-        meta.update(bitstream=str(args.bitstream.resolve()), bitstream_sha256=sha256(args.bitstream))
-        uart, loader, text = capture(args, args.output)
-        meta.update(uart=uart, programador=" ".join(loader))
+    text = ""
+    try:
+        if args.parse_only:
+            shutil.copy2(args.parse_only, args.output / "uart.log")
+            text = args.parse_only.read_text(errors="replace")
+        else:
+            if not args.bitstream:
+                raise RuntimeError("informe --bitstream exato; imagens não são escolhidas pela data")
+            meta.update(bitstream=str(args.bitstream.resolve()), bitstream_sha256=sha256(args.bitstream))
+            uart, loader, text = capture(args, args.output)
+            meta.update(uart=uart, programador=loader)
+    except (Exception, KeyboardInterrupt) as exc:
+        meta["error"] = f"{type(exc).__name__}: {exc}"
+        raw = args.output / "uart.log"
+        text = raw.read_text(errors="replace") if raw.exists() else ""
     if args.build_dir:
-        large = copy_reports(args.build_dir, args.output)
-        if large:
-            meta["relatorios_grandes_sha256"] = large
-    result = analyze(text)
+        meta["relatorios_grandes_sha256"] = copy_reports(args.build_dir, args.output)
+    result = analyze(text, args.profile)
+    if "error" in meta:
+        result["passed"] = False
     save(args.output, result, meta)
     print(f"\n==> Resultados salvos em {args.output}")
     sys.exit(0 if result["passed"] else 1)

@@ -27,7 +27,8 @@ def main():
         if not manifest.is_file():
             raise SystemExit("Existing overlay has no manifest; refusing to overwrite")
         saved = json.loads(manifest.read_text())
-        if saved.get("source_sha256") == before and saved.get("overlay_sha256") == hashes(args.destination):
+        if (saved.get("generator_sha256") == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+                and saved.get("source_sha256") == before and saved.get("overlay_sha256") == hashes(args.destination)):
             return
         # The overlay is a derived artifact owned by this script (it has our manifest):
         # regenerate it after a `git pull` instead of forcing a new build directory.
@@ -44,23 +45,45 @@ def main():
             if original.count(anchor) != 1:
                 raise ValueError("Expected the existing Montgomery multiply hook")
             modified = original.replace(anchor, """#if defined(MLK_RUNTIME_ACCEL)
-  if (mlkem_runtime_mode == 0) {
+  if (!mlkem_runtime_montgomery()) {
     res = mlk_montgomery_reduce((int32_t)a * (int32_t)b);
   } else
 #endif
 """ + anchor)
+            # Keep the original C Barrett expression and bounds, and select the
+            # hardware branch only for the accelerated runtime backend.
+            start = modified.index("#ifdef MLK_USE_BARRETT\n")
+            end = modified.index("#endif /* MLK_USE_BARRETT */", start)
+            block = modified[start:end]
+            hw, sw = block.split("#else\n", 1)
+            hw = hw.replace("#ifdef MLK_USE_BARRETT\n", "", 1).replace("int16_t res =", "res =")
+            sw = sw.replace("int16_t res =", "res =")
+            modified = modified[:start] + """  int16_t res;
+#ifdef MLK_USE_BARRETT
+#ifdef MLK_RUNTIME_ACCEL
+  if (mlkem_runtime_barrett())
+#endif
+  {
+""" + hw + """  }
+#ifdef MLK_RUNTIME_ACCEL
+  else
+#endif
+#endif
+#if !defined(MLK_USE_BARRETT) || defined(MLK_RUNTIME_ACCEL)
+  {
+""" + sw + "  }\n" + modified[end:]
         else:
             anchor = "static MLK_INLINE int16_t mlk_montred_hw(int32_t a)\n{\n"
             if original.count(anchor) != 1:
                 raise ValueError("Expected the existing Montgomery reduction hook")
             modified = original.replace(anchor, anchor + """#if defined(MLK_RUNTIME_ACCEL)
-  if (mlkem_runtime_mode == 0) return mlk_montgomery_reduce(a);
+  if (!mlkem_runtime_montgomery()) return mlk_montgomery_reduce(a);
 #endif
 """)
         path.write_text(modified)
         changes[name] = {"before": hashlib.sha256(original.encode()).hexdigest(),
                          "after": hashlib.sha256(modified.encode()).hexdigest()}
-    (args.destination / "runtime_overlay.json").write_text(json.dumps({"source_sha256": before, "overlay_sha256": hashes(args.destination), "changes": changes}, indent=2) + "\n")
+    (args.destination / "runtime_overlay.json").write_text(json.dumps({"generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "source_sha256": before, "overlay_sha256": hashes(args.destination), "changes": changes}, indent=2) + "\n")
 
 
 if __name__ == "__main__":
