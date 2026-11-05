@@ -240,6 +240,22 @@ São cinco repetições do mesmo vetor KAT, em um único boot, não cinco boots.
 UART_DEV=/dev/ttyUSB3 OFL_FTDI_SERIAL="FactoryAIOT Pro" ./litex/tang_primer_20k/bench_keccak.sh -keccak
 ```
 
+A UART é detectada antes do build pelos metadados USB da interface B do FT2232
+(Sipeed/FactoryAIOT), com preferência pelo nome persistente `/dev/serial/by-id/`.
+Não há fallback fixo para `/dev/ttyUSB2`. Se a porta não existir ou houver mais
+de uma candidata, o comando encerra antes do build, mostra o erro e salva o
+inventário em `uart_dispositivos.json`. `UART_DEV` permite seleção explícita.
+
+Para conferir as portas sem abrir UART nem programar:
+
+```bash
+~/litex-env/bin/python litex/tang_primer_20k/bench_keccak.py --detect-uart
+~/litex-env/bin/python -m serial.tools.list_ports -v
+```
+
+Se o build terminou e só a captura falhou, repita com `-keccak --skip-build`;
+não é necessário reconstruir o bitstream após esta correção da seleção UART.
+
 `--arch` aceita `full`, `compact`, `sliced8` (padrão) e `sliced16`; `KECCAK=full`
 continua válido. `--skip-build` exige uma imagem concluída por este runner, com
 fontes/perfil/argumentos e SHA-256 correspondentes. Builds antigos sem identidade,

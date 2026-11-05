@@ -116,6 +116,11 @@ unset MLKEM_ACCEL MLKEM_BUILD_DIR
 for tool in python3 sbt timeout openFPGALoader; do command -v "$tool" >/dev/null || { echo "Ferramenta ausente: $tool"; exit 1; }; done
 [ "$SKIP_BUILD" = 1 ] || command -v gw_sh >/dev/null || { echo "gw_sh ausente; confira GOWIN_HOME=$GOWIN_HOME"; exit 1; }
 python3 -c 'import serial, litex, litex_boards'
+UART_ARGS=()
+[ -z "${UART_DEV:-}" ] || UART_ARGS=(--uart "$UART_DEV")
+UART_DEV="$(python3 "$PKG_DIR/bench_keccak.py" --detect-uart --output "$OUT" "${UART_ARGS[@]}")"
+export UART_DEV
+echo "==> UART selecionada: $UART_DEV"
 if [ "$CHECK" = 1 ]; then "$PKG_DIR/deploy.sh" --check; STAGE=checagem; exit 0; fi
 IDENTITY_ARGS=(--build-dir "$BUILD_DIR" --profile "$PROFILE" --architecture "$KECCAK" --selected "$SELECTED")
 if [ "$SKIP_BUILD" = 0 ]; then

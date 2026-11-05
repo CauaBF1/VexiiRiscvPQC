@@ -12,6 +12,7 @@ import csv
 import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
 import statistics
@@ -27,7 +28,40 @@ PROFILE_NAMES = {"both": "Montgomery", "barrett": "Barrett", "montgomery-barrett
 OPS = ("keypair", "encaps", "decaps")
 SAMPLES = 5
 END_MARKERS = ("Done (No Console)", "No boot medium found")
-DEFAULT_UARTS = ("/dev/serial/by-id/usb-SIPEED_JTAG_Debugger_FactoryAIOT_Pro-if01-port0", "/dev/ttyUSB2")
+
+def uart_inventory():
+    from serial.tools import list_ports
+    keys = ("device", "vid", "pid", "serial_number", "location", "interface", "description", "hwid")
+    return [{key: getattr(port, key, None) for key in keys} for port in list_ports.comports()]
+
+
+def select_uart(requested=None, ports=None, board_serial=None):
+    """Select FT2232 interface B by USB metadata, never by ttyUSB numbering."""
+    ports = uart_inventory() if ports is None else ports
+    if requested:
+        if not Path(requested).exists():
+            raise RuntimeError(f"UART_DEV={requested} não existe; veja uart_dispositivos.json ou python3 -m serial.tools.list_ports -v")
+        return requested
+    candidates = [p for p in ports if p["vid"] == 0x0403 and p["pid"] == 0x6010
+                  and (re.search(r":1\.1(?:\s|$)", p.get("location") or "")
+                       or re.search(r"LOCATION=\S+:1\.1(?:\s|$)", p.get("hwid") or ""))]
+    normalize = lambda value: re.sub(r"[^a-z0-9]", "", (value or "").lower())
+    if board_serial:
+        candidates = [p for p in candidates if normalize(p.get("serial_number")) == normalize(board_serial)]
+    else:
+        known = [p for p in candidates if any(word in normalize(" ".join(str(v or "") for v in p.values()))
+                                             for word in ("sipeed", "factoryaiot", "tangprimer"))]
+        if known:
+            candidates = known
+    if len(candidates) != 1:
+        devices = ", ".join(str(p["device"]) for p in ports) or "nenhuma"
+        raise RuntimeError(f"UART Tang não identificada de forma única ({len(candidates)} candidatas; portas: {devices}). "
+                           "Confira python3 -m serial.tools.list_ports -v e defina UART_DEV=/dev/porta_correta. "
+                           "Nenhum build/programação iniciado por esta checagem.")
+    device = candidates[0]["device"]
+    # Prefer udev's persistent name when available; USB numbering may change.
+    aliases = sorted(p for p in Path("/dev/serial/by-id").glob("*") if p.exists() and p.resolve() == Path(device).resolve())
+    return str(aliases[0]) if aliases else device
 
 
 def sha256(path):
@@ -86,7 +120,7 @@ def capture(args, out):
     """Read UART during programming too, preserving partial data on all exits."""
     import serial
 
-    uart = args.uart or next((p for p in DEFAULT_UARTS if Path(p).exists()), DEFAULT_UARTS[-1])
+    uart = select_uart(args.uart, board_serial=os.environ.get("OFL_FTDI_SERIAL"))
     loader = ["openFPGALoader", "-b", "tangprimer20k"] + args.loader_arg + ["-m", str(args.bitstream)]
     target_kats = (2 if args.profile else 3) * SAMPLES
     process = None
@@ -207,7 +241,8 @@ def main():
     parser.add_argument("--existing-output", action="store_true")
     parser.add_argument("--profile", choices=("both", "barrett", "montgomery-barrett", "keccak", "all", "all-barrett"),
                         help="compara C e perfil; omitido analisa modo legado de três backends")
-    parser.add_argument("--uart", help="by-id da Sipeed; fallback /dev/ttyUSB2")
+    parser.add_argument("--uart", help="porta explícita; padrão: autodetectar interface B do FT2232")
+    parser.add_argument("--detect-uart", action="store_true", help="identificar UART sem abrir/programar a placa")
     parser.add_argument("--loader-arg", action="append", default=[])
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--label", default="")
@@ -218,6 +253,16 @@ def main():
     args = parser.parse_args()
     if args.finalize:
         finalize(args.finalize, args.exit_code, args.stage, args.build_dir)
+        return
+    if args.detect_uart:
+        try:
+            ports = uart_inventory()
+            if args.output:
+                args.output.mkdir(parents=True, exist_ok=True)
+                (args.output / "uart_dispositivos.json").write_text(json.dumps(ports, indent=2, ensure_ascii=False) + "\n")
+            print(select_uart(args.uart, ports, os.environ.get("OFL_FTDI_SERIAL")))
+        except Exception as exc:
+            parser.exit(1, f"ERRO: {exc}\n")
         return
     if not args.output:
         parser.error("--output é obrigatório")
@@ -238,6 +283,7 @@ def main():
             meta.update(uart=uart, programador=loader)
     except (Exception, KeyboardInterrupt) as exc:
         meta["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"ERRO: {meta['error']}", file=sys.stderr)
         raw = args.output / "uart.log"
         text = raw.read_text(errors="replace") if raw.exists() else ""
     if args.build_dir:

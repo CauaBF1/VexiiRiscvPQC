@@ -224,7 +224,7 @@ class CaptureTests(unittest.TestCase):
         process = Mock()
         process.poll.return_value = code
         args = types.SimpleNamespace(uart="fake", loader_arg=[], bitstream=Path("image.fs"), profile="keccak", timeout=300)
-        with patch.dict("sys.modules", {"serial": types.SimpleNamespace(Serial=Mock(return_value=port))}), patch.object(bench.subprocess, "Popen", return_value=process) as popen:
+        with patch.dict("sys.modules", {"serial": types.SimpleNamespace(Serial=Mock(return_value=port))}), patch.object(bench, "select_uart", return_value="fake"), patch.object(bench.subprocess, "Popen", return_value=process) as popen:
             if times:
                 with patch.object(bench.time, "monotonic", side_effect=times):
                     with self.assertRaisesRegex(RuntimeError, "60s"):
@@ -245,6 +245,47 @@ class CaptureTests(unittest.TestCase):
     def test_programmer_timeout_terminates_process_and_preserves_uart(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.capture(Path(tmp), None, [0, 0, 61])
+
+
+class UartSelectionTests(unittest.TestCase):
+    @staticmethod
+    def port(device, interface, serial="FactoryAIOT Pro"):
+        return {"device": device, "vid": 0x0403, "pid": 0x6010,
+                "serial_number": serial, "location": f"1-4:1.{interface}",
+                "hwid": "", "description": "Dual RS232-HS", "interface": None}
+
+    def test_interface_b_is_selected_independent_of_number(self):
+        ports = [self.port("/dev/ttyUSB8", 0), self.port("/dev/ttyUSB9", 1)]
+        self.assertEqual(bench.select_uart(ports=ports), "/dev/ttyUSB9")
+
+    def test_missing_port_and_no_candidates_fail_without_default(self):
+        with self.assertRaisesRegex(RuntimeError, "não existe"):
+            bench.select_uart("/dev/nonexistent-vexii-uart", ports=[])
+        with self.assertRaisesRegex(RuntimeError, "nenhuma"):
+            bench.select_uart(ports=[])
+        with self.assertRaisesRegex(RuntimeError, "0 candidatas"):
+            bench.select_uart(ports=[self.port("/dev/ttyUSB2", 0)])
+
+    def test_multiple_boards_require_selection(self):
+        ports = [self.port("/dev/ttyUSB3", 1, "board-a"), self.port("/dev/ttyUSB7", 1, "board-b")]
+        with self.assertRaisesRegex(RuntimeError, "2 candidatas"):
+            bench.select_uart(ports=ports)
+        self.assertEqual(bench.select_uart(ports=ports, board_serial="board-b"), "/dev/ttyUSB7")
+
+    def test_explicit_existing_path_is_respected(self):
+        with tempfile.NamedTemporaryFile() as port:
+            self.assertEqual(bench.select_uart(port.name, ports=[]), port.name)
+
+    def test_detection_failure_prints_error_and_records_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = subprocess.run(["python3", str(DIR / "bench_keccak.py"), "--detect-uart", "--uart", "/dev/nonexistent-vexii-uart", "--output", tmp], capture_output=True, text=True)
+            # pyserial may be absent from the default host Python, so exercise
+            # the real entry point with the installed LiteX Python when available.
+            if "No module named 'serial'" in run.stderr:
+                self.skipTest("pyserial unavailable in default interpreter")
+            self.assertEqual(run.returncode, 1)
+            self.assertIn("não existe", run.stderr)
+            self.assertTrue((Path(tmp) / "uart_dispositivos.json").is_file())
 
 
 if __name__ == "__main__":
