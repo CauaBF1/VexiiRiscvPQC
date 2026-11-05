@@ -59,6 +59,8 @@ python3 -m litex.tools.litex_term /dev/ttyUSB2 --speed 115200
 | `VEXII_ARGS` | vazio | flags opcionais do gerador do core (ex.: `--with-btb --with-ras --with-gshare`) |
 | `MLKEM_ACCEL` | `none` | seleciona `none`, `montmul`, `montred`, `both`, `keccak`, `montmul-keccak`, `montred-keccak` ou `all` no HW e SW |
 | `MLKEM_HW`/`MLKEM_SW` | — | modo avançado; devem ser informados juntos e o SW deve ser subconjunto do HW |
+| `MLKEM_KECCAK_ARCH` | `full` | seleciona arquitetura Keccak (`full`, `compact`, `sliced8` ou `sliced16`) |
+| `MLKEM_RUNTIME_BENCH` | `0` | `1` habilita benchmark runtime (C / Montgomery / Montgomery+Keccak em 1 boot; exige `hw=all sw=all`) |
 | `MLKEM_BUILD_DIR` | automático | sobrescreve `~/litex/build/mlkem_hw_<HW>_sw_<SW>` |
 | `UART_DEV` | `/dev/ttyUSB2` | porta serial observada no vlab; ajuste em outra máquina |
 
@@ -114,10 +116,13 @@ divergentes.
 
 A arquitetura `full` conserva a E2a, com 24 ciclos por permutação. A candidata
 `compact` compartilha χ entre cinco linhas, usa o mesmo banco de 1.600 bits e
-leva 144 ciclos. No deploy, selecione `MLKEM_KECCAK_ARCH=compact`; em SocGen ou
-TestBench, use `--with-keccak --keccak-architecture=compact`. O padrão continua
-`full` para permitir comparação explícita. Nomes do gerador, argumentos,
-manifesto e diretório padrão do deploy distinguem as duas arquiteturas.
+leva 144 ciclos. As variantes `sliced8` (225 ciclos) e `sliced16` (125 ciclos)
+operam por fatias com escrita rotativa para reduzir LUTs mantendo throughput em
+RV32. No deploy, selecione `MLKEM_KECCAK_ARCH=sliced8` (ou `compact`/`sliced16`);
+em SocGen ou TestBench, use `--with-keccak --keccak-architecture=<arch>`. O padrão
+do `deploy.sh` continua `full` para permitir comparação explícita (já o
+`bench_keccak.sh` usa `KECCAK=sliced8` por padrão). Nomes do gerador, argumentos,
+manifesto e diretório padrão do deploy distinguem as arquiteturas.
 
 A receita limitada a **uma tentativa de 20 minutos**, resultados locais e
 limitações físicas estão em
@@ -171,6 +176,51 @@ inclua `_zbb` (core e firmware sempre com a mesma ISA). Combinável com o sweet-
 ---
 
 ## Executar no vlab
+
+### Modo simples com benchmarks salvos (push no GitHub → pull no vlab)
+
+Um único comando usa o checkout `~/VexiiRiscvPQC` já existente (sem criar worktrees ou diretórios extras fora do `build/` padrão do LiteX), compila o SoC com `MLKEM_HW=all MLKEM_SW=all MLKEM_RUNTIME_BENCH=1`, grava apenas a **SRAM** da placa, captura a UART e salva os resultados em `litex/tang_primer_20k/resultados/<timestamp>_keccak_<arch>/` (`RESUMO.md`, `ciclos.csv`, `resultado.json`, `uart.log`, `programador.log`, `mlkem_build_manifest.md`, `build.log.gz` e relatórios Gowin em `relatorios/`).
+
+Na mesma imagem e em um único boot, o firmware mede 5 amostras do vetor KAT em cada backend: `0 = C`, `1 = Montgomery` e `2 = Montgomery+Keccak`.
+
+**1. Nesta máquina (enviar alterações para o GitHub):**
+
+```bash
+cd ~/VexiiRiscvPQC
+git status --short
+# adicione os arquivos da campanha e envie para origin/dev:
+git add src/ litex/tang_primer_20k/
+git commit -m "keccak: fluxo git + benchmark runtime na Tang 20K"
+git push origin dev
+```
+
+**2. No vlab (atualizar e rodar tudo):**
+
+```bash
+cd ~/VexiiRiscvPQC
+git pull --ff-only origin dev
+./litex/tang_primer_20k/bench_keccak.sh
+```
+
+Variações opcionais no vlab:
+
+```bash
+KECCAK=full ./litex/tang_primer_20k/bench_keccak.sh       # full | compact | sliced8 (default) | sliced16
+./litex/tang_primer_20k/bench_keccak.sh --skip-build      # regrava a SRAM e remede sem recompilar
+UART_DEV=/dev/ttyUSB3 OFL_FTDI_SERIAL="FactoryAIOT Pro" ./litex/tang_primer_20k/bench_keccak.sh
+```
+
+**3. No vlab (opcional — versionar os resultados de volta no GitHub):**
+
+```bash
+git add litex/tang_primer_20k/resultados
+git commit -m "bench: resultados keccak Tang 20K"
+git push origin dev
+```
+
+---
+
+### Campanha manual por configuração
 
 O baseline `none` já produziu `KAT PASS` na placa. A campanha abaixo mantém
 rv32im, 48 MHz, ROM/SRAM e firmware determinístico; somente os seletores dos

@@ -178,6 +178,8 @@ class ParamSimple() {
   // configurations do not gain a 1,600-bit state bank or custom opcodes.
   var withKeccak = false
   var keccakCompact = false
+  // Experimental folded state engine; zero keeps the existing full/compact ABI.
+  var keccakSlicedBlocks = 0
   var divRadix = 2
   var divImpl = ""
   var divArea = true
@@ -623,7 +625,8 @@ class ParamSimple() {
     if (withMontMul) r += "montmul"
     if (withMontRed) r += "montred"
     if (withBarrett) r += "barrett"
-    if (withKeccak) r += (if (keccakCompact) "keccakcompact" else "keccak")
+    if (withKeccak) r += (if (keccakSlicedBlocks != 0) s"keccaksliced${64 / keccakSlicedBlocks}"
+                         else if (keccakCompact) "keccakcompact" else "keccak")
     if (extension.withDiv) r += s"d${divRadix}${divImpl}${if(divArea)"Area" else ""}"
     if (privParam.withImsic) r += s"if${privParam.imsicInterrupts}gf${privParam.guestExternalInterruptFiles}"
     if (privParam.withDebug) r += s"pdbg"
@@ -722,9 +725,12 @@ class ParamSimple() {
     opt[Unit]("with-barrett") action { (v, c) => withBarrett = true }
     opt[Unit]("with-keccak") action { (v, c) => withKeccak = true }
     opt[String]("keccak-architecture") validate { v =>
-      if (Set("full", "compact").contains(v)) success
-      else failure("keccak-architecture must be full or compact")
-    } action { (v, c) => keccakCompact = v == "compact" }
+      if (Set("full", "compact", "sliced8", "sliced16").contains(v)) success
+      else failure("keccak-architecture must be full, compact, sliced8 or sliced16")
+    } action { (v, c) =>
+      keccakCompact = v == "compact"
+      keccakSlicedBlocks = v match { case "sliced8" => 8; case "sliced16" => 4; case _ => 0 }
+    }
     opt[Unit]("with-sxaia").action { (v, c) => addISA("smaia", "ssaia") }
       .text("Enable the Smaia and Ssaia extensions.")
     opt[Int]("imsic-interrupt-number").action { (v, c) => privParam.imsicInterrupts = v }
@@ -1144,7 +1150,10 @@ class ParamSimple() {
     if(withMontMul) plugins += new MontMulPlugin(early0)
     if(withMontRed) plugins += new MontRedPlugin(early0)
     if(withBarrett) plugins += new BarrettPlugin(early0)
-    if(withKeccak) plugins += new KeccakPlugin(early0, compact = keccakCompact)
+    if(withKeccak) {
+      if (keccakSlicedBlocks != 0) plugins += new KeccakSlicedPlugin(early0, blocks = keccakSlicedBlocks)
+      else plugins += new KeccakPlugin(early0, compact = keccakCompact)
+    }
     plugins += new IntFormatPlugin(lane0)
     plugins += new BranchPlugin(layer=early0, aluAt=0, jumpAt=relaxedBranch.toInt, wbAt=0)
     if(extension.withRvZknAes) plugins ++= AesZknPlugin.make(layer = early0, xlen = xlen)

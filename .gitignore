@@ -71,6 +71,10 @@ understanding/
 src/main/c/vexii/mlkem512/build/
 graphify-out/
 src/test/python/__pycache__/
+__pycache__/
+*.pyc
+!litex/tang_primer_20k/resultados/**/*.json
+!litex/tang_primer_20k/resultados/**/*.log
 
 # Configuração e artefatos locais do Codex
 /.codex/

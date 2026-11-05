@@ -6,6 +6,11 @@
 
 #include "kat_vectors.h"
 #include "mlkem_native.h"
+#include "mlkem_accel_runtime.h"
+
+#ifdef MLK_RUNTIME_ACCEL
+volatile uint32_t mlkem_runtime_mode;
+#endif
 
 int litex_mlkem_kat_status(void);
 
@@ -82,7 +87,7 @@ static void report_cycles(const char *name, uint32_t cycles)
 	printf("[MLKEM] bench_%s_cycles=%lu\n", name, (unsigned long)cycles);
 }
 
-int litex_mlkem_kat_status(void)
+static int run_kat(void)
 {
 	int pass = 1;
 
@@ -157,4 +162,21 @@ int litex_mlkem_kat_status(void)
 	status(pass ? 0x00f00d : 0x00eeee);
 	printf("[MLKEM] KAT %s\n", pass ? "PASS" : "FAIL");
 	return pass;
+}
+
+int litex_mlkem_kat_status(void)
+{
+#ifdef MLK_RUNTIME_ACCEL
+  int pass = 1;
+  for (mlkem_runtime_mode = 0; mlkem_runtime_mode < 3; mlkem_runtime_mode++) {
+    printf("[MLKEM] backend=%lu\n", (unsigned long)mlkem_runtime_mode);
+    for (unsigned sample = 0; sample < 5; sample++) {
+      printf("[MLKEM] sample=%u\n", sample);
+      pass &= run_kat();
+    }
+  }
+  return pass;
+#else
+  return run_kat();
+#endif
 }

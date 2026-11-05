@@ -17,6 +17,7 @@ LITEX_DIR="${LITEX_DIR:-$HOME/litex}"
 CPU_VARIANT="${CPU_VARIANT:-standard}"
 VEXII_ARGS="${VEXII_ARGS:-}"
 MLKEM_KECCAK_ARCH="${MLKEM_KECCAK_ARCH:-full}"
+MLKEM_RUNTIME_BENCH="${MLKEM_RUNTIME_BENCH:-0}"
 UART_DEV="${UART_DEV:-/dev/ttyUSB2}"
 MLKEM_DIR="$REPO_ROOT/src/main/c/vexii/mlkem512"
 MLKEM_PATCH="$REPO_ROOT/external/mlkem-native.patch"
@@ -75,10 +76,16 @@ resolve_accel_config() {
 
   valid_accel_config "$MLKEM_HW_VALUE" || die "MLKEM_HW inválido: $MLKEM_HW_VALUE"
   valid_accel_config "$MLKEM_SW_VALUE" || die "MLKEM_SW inválido: $MLKEM_SW_VALUE"
+  case "$MLKEM_RUNTIME_BENCH" in 0|1) ;; *) die "MLKEM_RUNTIME_BENCH deve ser 0 ou 1" ;; esac
+  if [ "$MLKEM_RUNTIME_BENCH" = 1 ] && { [ "$MLKEM_HW_VALUE" != all ] || [ "$MLKEM_SW_VALUE" != all ]; }; then
+    die "benchmark runtime exige MLKEM_HW=all e MLKEM_SW=all (sem Barrett)"
+  fi
   case "$MLKEM_KECCAK_ARCH" in
     full) KECCAK_CYCLES=24 ;;
     compact) KECCAK_CYCLES=144 ;;
-    *) die "MLKEM_KECCAK_ARCH inválido: use full ou compact" ;;
+    sliced8) KECCAK_CYCLES=225 ;;
+    sliced16) KECCAK_CYCLES=125 ;;
+    *) die "MLKEM_KECCAK_ARCH inválido: use full, compact, sliced8 ou sliced16" ;;
   esac
 
   if [[ "$VEXII_ARGS" =~ (^|[[:space:]])--with-(montmul|montred|keccak|barrett)($|[=[:space:]]) ]]; then
@@ -107,9 +114,10 @@ resolve_accel_config() {
     VEXII_EFFECTIVE_ARGS="${VEXII_EFFECTIVE_ARGS:+$VEXII_EFFECTIVE_ARGS }${MLKEM_HW_VEXII_ARGS[*]}"
   fi
   BUILD_DIR="${MLKEM_BUILD_DIR:-$LITEX_DIR/build/mlkem_hw_${MLKEM_HW_VALUE}_sw_${MLKEM_SW_VALUE}}"
-  if [ -z "${MLKEM_BUILD_DIR:-}" ] && config_has_feature "$MLKEM_HW_VALUE" keccak && [ "$MLKEM_KECCAK_ARCH" = compact ]; then
-    BUILD_DIR+="_keccak_compact"
+  if [ -z "${MLKEM_BUILD_DIR:-}" ] && config_has_feature "$MLKEM_HW_VALUE" keccak && [ "$MLKEM_KECCAK_ARCH" != full ]; then
+    BUILD_DIR+="_keccak_$MLKEM_KECCAK_ARCH"
   fi
+  if [ -z "${MLKEM_BUILD_DIR:-}" ] && [ "$MLKEM_RUNTIME_BENCH" = 1 ]; then BUILD_DIR+="_runtime"; fi
   [[ "$BUILD_DIR" = /* ]] || BUILD_DIR="$REPO_ROOT/$BUILD_DIR"
 }
 
@@ -275,6 +283,12 @@ cp "$PKG_DIR/bios/mlkem_litex.c"               "$BIOS_DIR/"
 cp "$PKG_DIR/bios/mlkem_native_litex_config.h" "$BIOS_DIR/"
 cp "$PKG_DIR/bios/kat_vectors.h"               "$BIOS_DIR/"
 cp "$MLKEM_DIR/src/mlkem_keccak_vexii.h"       "$BIOS_DIR/"
+cp "$MLKEM_DIR/src/mlkem_accel_runtime.h"      "$BIOS_DIR/"
+MLKEM_NATIVE_DIR="$MLKEM_NATIVE_ROOT/mlkem"
+if [ "$MLKEM_RUNTIME_BENCH" = 1 ]; then
+  python3 "$PKG_DIR/prepare_runtime_backend.py" "$MLKEM_NATIVE_ROOT" "$BUILD_DIR/runtime_backend"
+  MLKEM_NATIVE_DIR="$BUILD_DIR/runtime_backend/mlkem"
+fi
 
 write_accel_header() {
   local destination="$BIOS_DIR/mlkem_accel_select.h" temporary
@@ -283,6 +297,9 @@ write_accel_header() {
     printf '%s\n' '#ifndef MLKEM_ACCEL_SELECT_H' '#define MLKEM_ACCEL_SELECT_H' ''
     printf '#define MLKEM_HW_ACCEL_NAME "%s"\n' "$MLKEM_HW_VALUE"
     printf '#define MLKEM_SW_ACCEL_NAME "%s"\n' "$MLKEM_SW_VALUE"
+    if [ "$MLKEM_RUNTIME_BENCH" = 1 ]; then
+      printf '%s\n' '#define MLK_RUNTIME_ACCEL' '#include "mlkem_accel_runtime.h"'
+    fi
     config_has_feature "$MLKEM_HW_VALUE" montmul && printf '%s\n' '#define MLK_HW_HAS_MONTMUL'
     config_has_feature "$MLKEM_HW_VALUE" montred && printf '%s\n' '#define MLK_HW_HAS_MONTRED'
     config_has_feature "$MLKEM_HW_VALUE" barrett && printf '%s\n' '#define MLK_HW_HAS_BARRETT'
@@ -320,7 +337,6 @@ MK="$BIOS_DIR/Makefile"
 if ! grep -q 'MLKEM_NATIVE_DIR' "$MK"; then
   say "Aplicando integração no Makefile do BIOS (backup em Makefile.pre-mlkem)"
   cp "$MK" "$MK.pre-mlkem"
-  MLKEM_NATIVE_DIR="$REPO_ROOT/external/mlkem-native/mlkem"
   awk -v dir="$MLKEM_NATIVE_DIR" '
     { print }
     /software\/common.mak/ && !done {
@@ -339,7 +355,7 @@ if ! grep -q 'MLKEM_NATIVE_DIR' "$MK"; then
 else
   say "Makefile do BIOS já contém a integração ML-KEM"
 fi
-sed -i "s|^MLKEM_NATIVE_DIR ?=.*|MLKEM_NATIVE_DIR ?= $REPO_ROOT/external/mlkem-native/mlkem|" "$MK"
+sed -i "s|^MLKEM_NATIVE_DIR ?=.*|MLKEM_NATIVE_DIR ?= $MLKEM_NATIVE_DIR|" "$MK"
 
 MAIN="$BIOS_DIR/main.c"
 if ! grep -q 'litex_mlkem_kat_status' "$MAIN"; then
@@ -373,6 +389,7 @@ write_manifest() {
     printf -- '- LiteX-Boards: `%s`\n' "$(git -C "$(dirname "$BOARD_TARGET")" rev-parse HEAD)"
     printf -- '- Hardware: `%s`\n' "$MLKEM_HW_VALUE"
     printf -- '- Firmware: `%s`\n' "$MLKEM_SW_VALUE"
+    printf -- '- Benchmark runtime C/Montgomery/Montgomery+Keccak: `%s`\n' "$MLKEM_RUNTIME_BENCH"
     printf -- '- CPU variant: `%s`\n' "$CPU_VARIANT"
     printf -- '- Vexii args: `%s`\n' "${VEXII_EFFECTIVE_ARGS:-<vazio>}"
     printf -- '- Clock alvo: `48000000 Hz`\n'
@@ -381,7 +398,7 @@ write_manifest() {
     printf -- '- Keccak opcode: `custom-2/0x5b`, `funct7=0`, `funct3=0..3`\n'
     if config_has_feature "$MLKEM_HW_VALUE" keccak; then
       printf -- '- Keccak arquitetura: `%s`\n' "$MLKEM_KECCAK_ARCH"
-      printf -- '- Keccak latência nominal: `%s ciclos por permutação`\n' "$KECCAK_CYCLES"
+      printf -- '- Keccak latência do núcleo, incluindo aceitação: `%s ciclos por permutação`\n' "$KECCAK_CYCLES"
     fi
     printf -- '- Python: `%s`\n' "$(python3 -c 'import platform; print(platform.python_version())')"
     printf -- '- Meson: `%s`\n' "$(meson --version)"

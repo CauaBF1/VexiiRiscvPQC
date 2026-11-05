@@ -40,6 +40,9 @@ static MLK_INLINE void mlk_vexii_kclear(void)
 MLK_MUST_CHECK_RETURN_VALUE
 static MLK_INLINE int mlk_keccak_f1600_x1_native(uint64_t *state)
 {
+#ifdef MLK_RUNTIME_ACCEL
+  if (mlkem_runtime_mode < 2) return MLK_NATIVE_FUNC_FALLBACK;
+#endif
   unsigned lane;
   /* The upstream C fallback is bracketed after the native early-return. Put
    * the same bucket around this backend so PROFILE=yes measures the complete
